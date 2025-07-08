@@ -13,6 +13,7 @@ import pandas as pd
 from AIMM_simulator import *
 from hexalattice.hexalattice import *
 import utils_kiss
+from exp3_cell_on_off import EXP3CellOnOff, extend_cell_energy_model, EXP3ModelEvaluator
 
 
 # Fix custom imports
@@ -1452,7 +1453,11 @@ def main(config_dict):
     for cell in sim.cells:
         cell_energy_models_dict[cell.i] = (CellEnergyModel(cell))
         cell.set_f_callback(cell_energy_models_dict[cell.i].f_callback(cell))
+    # EXP3를 위한 CellEnergyModel 확장
+    if scenario_profile == "exp3_cell_on_off":
+        extend_cell_energy_model(CellEnergyModel)
 
+        
     # Add the logger to the simulator
     custom_logger = MyLogger(sim,
                              logging_interval = base_interval, 
@@ -1506,6 +1511,83 @@ def main(config_dict):
         time_cell_sleep_level_duration=SetCellSleep_bedtime_stories
         )
     
+    
+    exp3_cell_on_off = None
+    if scenario_profile == "exp3_cell_on_off":
+        # 설정에서 EXP3 파라미터 가져오기
+        exp3_n_cells_off = config_dict.get("exp3_n_cells_off", 3)
+        exp3_gamma = config_dict.get("exp3_gamma", 0.1)
+        exp3_warmup_episodes = config_dict.get("exp3_warmup_episodes", 100)
+        exp3_enable_warmup = config_dict.get("exp3_enable_warmup", True)
+        exp3_ensure_min_selection = config_dict.get("exp3_ensure_min_selection", True)
+        exp3_linear_power_model = config_dict.get("exp3_linear_power_model", False)
+        exp3_power_model_k = config_dict.get("exp3_power_model_k", 0.05)
+        exp3_learning_log = config_dict.get("exp3_learning_log", None)
+        exp3_final_model = config_dict.get("exp3_final_model", None)
+        
+        # 로그 파일 경로 생성
+        if exp3_learning_log:
+            exp3_learning_log = os.path.join(
+                os.path.dirname(data_output_logfile_path),
+                exp3_learning_log
+            )
+        if exp3_final_model:
+            exp3_final_model = os.path.join(
+                os.path.dirname(data_output_logfile_path),
+                exp3_final_model
+            )
+        
+        # EXP3 시나리오 생성
+        exp3_cell_on_off = EXP3CellOnOff(
+            sim=sim,
+            k_cells=len(sim.cells),
+            n_cells_off=exp3_n_cells_off,
+            interval=base_interval,
+            delay=scenario_delay,
+            gamma=exp3_gamma,
+            warmup_episodes=exp3_warmup_episodes,
+            enable_warmup=exp3_enable_warmup,
+            ensure_min_selection=exp3_ensure_min_selection,
+            linear_power_model=exp3_linear_power_model,
+            power_model_k=exp3_power_model_k,
+            learning_log_file=exp3_learning_log,
+            final_model_file=exp3_final_model,
+            verbose=True
+        )
+        
+        # 셀 에너지 모델 참조 설정
+        exp3_cell_on_off.set_cell_energy_models(cell_energy_models_dict)
+    
+    
+     # EXP3 모델 평가 시나리오 (학습된 모델 적용용)
+    exp3_evaluation = None
+    if scenario_profile == "exp3_evaluation":
+        model_file = config_dict.get("exp3_model_file")
+        if not model_file:
+            raise ValueError("exp3_model_file must be specified for exp3_evaluation scenario")
+            
+        # 학습된 모델 로드
+        evaluator = EXP3ModelEvaluator(model_file)
+        best_arm_idx, best_arm_cells = evaluator.get_best_arm()
+        
+        print(f"Applying trained EXP3 model: Best arm {best_arm_idx}, turning off cells {best_arm_cells}")
+        
+        # 최적 arm으로 SwitchNCellsOff 시나리오 사용
+        exp3_evaluation = SwitchNCellsOff(
+            sim=sim,
+            delay=scenario_delay,
+            interval=base_interval,
+            n_cells=0  # 수동으로 셀 지정
+        )
+        # 최적 arm의 셀로 오버라이드
+        exp3_evaluation.target_cells = best_arm_cells
+    
+    
+    
+    
+    
+    
+    
     # Activate scenarios
     if scenario_profile == "reduce_random_cell_power":
         sim.add_scenario(scenario=reduce_random_cell_power)
@@ -1519,6 +1601,11 @@ def main(config_dict):
         sim.add_scenario(scenario=switch_n_cells_off)
     elif scenario_profile == "set_cell_sleep":
         sim.add_scenario(scenario=set_cell_sleep)
+    elif scenario_profile == "exp3_cell_on_off":
+        sim.add_scenario(scenario=exp3_cell_on_off)
+    elif scenario_profile == "exp3_evaluation":
+        sim.add_scenario(scenario=exp3_evaluation)
+
     elif scenario_profile == "no_scenarios":
         pass
     else:
