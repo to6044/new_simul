@@ -78,7 +78,14 @@ class EXP3CellOnOff(Scenario):
         self.linear_power_model = linear_power_model
         self.power_model_k = power_model_k
         self.verbose = verbose
-        
+       
+        # Regret 추적을 위한 변수 추가
+        self.instant_regret_history = []  # 매 스텝의 순간 regret
+        self.cumulative_regret_history = []  # 누적 regret
+        self.cumulative_regret = 0.0
+        self.oracle_cumulative_reward = 0.0  # 최적 arm의 누적 보상
+        self.actual_cumulative_reward = 0.0  # 실제 얻은 누적 보상    
+
         # Create log directory if needed
         if learning_log_file:
             os.makedirs(os.path.dirname(learning_log_file), exist_ok=True)
@@ -156,7 +163,7 @@ class EXP3CellOnOff(Scenario):
             if is_cell_off:
                 turned_off_cells += 1
                 # 꺼진 셀도 최소한의 전력 소비 (sleep mode)
-                total_power += 0.1  # 100W sleep power
+                total_power += 0.3  # 300W sleep power
                 continue
                 
             # 활성 셀의 처리량 계산
@@ -381,6 +388,7 @@ class EXP3CellOnOff(Scenario):
     def save_learning_progress(self):
         """Save current learning progress to file"""
         if self.learning_log_file:
+            regret_stats = self.get_regret_statistics()
             progress_data = {
                 'episode': int(self.episode_count),
                 'timestamp': float(self.sim.env.now),
@@ -395,7 +403,11 @@ class EXP3CellOnOff(Scenario):
                 'max_efficiency': float(self.max_efficiency),
                 'baseline_efficiency': float(self.baseline_efficiency) if self.baseline_efficiency else None,
                 'baseline_throughput': float(self.baseline_throughput) if self.baseline_throughput else None,
-                'baseline_power': float(self.baseline_power) if self.baseline_power else None
+                'baseline_power': float(self.baseline_power) if self.baseline_power else None,
+                'cumulative_regret': float(self.cumulative_regret),
+                'cumulative_regret_history': self.cumulative_regret_history[-100:],  # 최근 100개
+                'instant_regret_history': self.instant_regret_history[-100:],
+                'regret_statistics': regret_stats
             }
             
             with open(self.learning_log_file, 'w') as f:
@@ -564,6 +576,8 @@ class EXP3CellOnOff(Scenario):
             self.cumulative_rewards[selected_arm] += reward
             self.reward_history.append(reward)
             self.selected_arm_history.append(selected_arm)
+            self.update_regret_tracking(selected_arm, reward)
+
             
             # Update EXP3 weights (only after warm-up)
             if self.episode_count > self.warmup_episodes:
@@ -584,7 +598,16 @@ class EXP3CellOnOff(Scenario):
             if self.episode_count % 10 == 0:  # Store every 10 episodes to limit memory
                 self.weight_history.append(self.weights.copy())
                 self.probability_history.append(self.probabilities.copy())
-                
+            
+            # Regret 정보 출력 (매 10 에피소드)
+            if self.episode_count % 10 == 0:
+                regret_stats = self.get_regret_statistics()
+                print(f"\n  Regret Statistics:")
+                print(f"    Cumulative regret: {regret_stats['cumulative_regret']:.4f}")
+                print(f"    Average regret: {regret_stats['average_regret']:.4f}")
+                print(f"    Theoretical bound: {regret_stats['theoretical_bound']:.4f}")
+                print(f"    Regret ratio: {regret_stats['regret_ratio']:.2%}")    
+            
             # Log progress and save
             if self.episode_count % 50 == 0:
                 avg_reward = np.mean(self.reward_history[-50:]) if len(self.reward_history) >= 50 else np.mean(self.reward_history)
@@ -627,6 +650,193 @@ class EXP3CellOnOff(Scenario):
                     
                 break
 
+    def calculate_instant_regret(self, selected_arm: int, reward: float):
+        """
+        순간 regret 계산
+        
+        Parameters:
+        -----------
+        selected_arm : int
+            선택된 arm
+        reward : float
+            획득한 보상
+            
+        Returns:
+        --------
+        float
+            순간 regret
+        """
+        # 현재까지의 각 arm의 평균 보상 계산
+        avg_rewards = np.zeros(self.n_arms)
+        for i in range(self.n_arms):
+            if self.arm_selection_count[i] > 0:
+                avg_rewards[i] = self.cumulative_rewards[i] / self.arm_selection_count[i]
+        
+        # 최고 평균 보상 (oracle)
+        best_avg_reward = np.max(avg_rewards) if np.any(avg_rewards > 0) else reward
+        
+        # 순간 regret = 최적 보상 - 실제 보상
+        instant_regret = best_avg_reward - reward
+        
+        return instant_regret
+    
+    def update_regret_tracking(self, selected_arm: int, reward: float):
+        """
+        Regret 관련 통계 업데이트
+        
+        Parameters:
+        -----------
+        selected_arm : int
+            선택된 arm
+        reward : float
+            획득한 보상
+        """
+        # 순간 regret 계산
+        instant_regret = self.calculate_instant_regret(selected_arm, reward)
+        self.instant_regret_history.append(instant_regret)
+        
+        # 누적 regret 업데이트
+        self.cumulative_regret += instant_regret
+        self.cumulative_regret_history.append(self.cumulative_regret)
+        
+        # 실제 누적 보상 업데이트
+        self.actual_cumulative_reward += reward
+        
+        # Oracle 누적 보상 업데이트 (사후 분석용)
+        if self.episode_count > self.warmup_episodes:
+            avg_rewards = np.zeros(self.n_arms)
+            for i in range(self.n_arms):
+                if self.arm_selection_count[i] > 0:
+                    avg_rewards[i] = self.cumulative_rewards[i] / self.arm_selection_count[i]
+            
+            if np.any(avg_rewards > 0):
+                best_avg_reward = np.max(avg_rewards)
+                self.oracle_cumulative_reward += best_avg_reward
+    
+    def calculate_theoretical_regret_bound(self):
+        """
+        EXP3의 이론적 regret bound 계산
+        
+        Returns:
+        --------
+        float
+            이론적 regret 상한
+        """
+        T = self.episode_count
+        K = self.n_arms
+        
+        # EXP3의 이론적 regret bound: O(√(TK log K))
+        theoretical_bound = 2 * np.sqrt(T * K * np.log(K))
+        
+        return theoretical_bound
+    
+    def get_regret_statistics(self):
+        """
+        Regret 관련 통계 반환
+        
+        Returns:
+        --------
+        dict
+            Regret 통계
+        """
+        if self.episode_count == 0:
+            return {}
+            
+        # 최종 arm별 평균 보상
+        avg_rewards = np.zeros(self.n_arms)
+        for i in range(self.n_arms):
+            if self.arm_selection_count[i] > 0:
+                avg_rewards[i] = self.cumulative_rewards[i] / self.arm_selection_count[i]
+        
+        best_arm_idx = np.argmax(avg_rewards)
+        best_arm_avg_reward = avg_rewards[best_arm_idx]
+        
+        # 실제 평균 보상
+        actual_avg_reward = self.actual_cumulative_reward / self.episode_count
+        
+        # 이론적 bound
+        theoretical_bound = self.calculate_theoretical_regret_bound()
+        
+        return {
+            'cumulative_regret': self.cumulative_regret,
+            'average_regret': self.cumulative_regret / self.episode_count,
+            'theoretical_bound': theoretical_bound,
+            'regret_ratio': self.cumulative_regret / theoretical_bound if theoretical_bound > 0 else 0,
+            'best_arm_idx': int(best_arm_idx),
+            'best_arm_avg_reward': float(best_arm_avg_reward),
+            'actual_avg_reward': float(actual_avg_reward),
+            'regret_per_episode': self.cumulative_regret / self.episode_count
+        }
+        
+    def plot_regret_analysis(self, save_path=None):
+        """
+        Regret 분석 플롯 생성
+        
+        Parameters:
+        -----------
+        save_path : str
+            저장 경로 (None이면 화면에 표시)
+        """
+        if len(self.cumulative_regret_history) == 0:
+            print("No regret data to plot")
+            return
+            
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+        fig.suptitle('EXP3 Regret Analysis', fontsize=16)
+        
+        # 누적 regret
+        ax = axes[0, 0]
+        episodes = range(1, len(self.cumulative_regret_history) + 1)
+        ax.plot(episodes, self.cumulative_regret_history, 'b-', label='Actual')
+        
+        # 이론적 bound 추가
+        theoretical_bounds = [2 * np.sqrt(t * self.n_arms * np.log(self.n_arms)) 
+                            for t in episodes]
+        ax.plot(episodes, theoretical_bounds, 'r--', label='Theoretical Bound')
+        ax.set_xlabel('Episode')
+        ax.set_ylabel('Cumulative Regret')
+        ax.set_title('Cumulative Regret vs Theoretical Bound')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 순간 regret
+        ax = axes[0, 1]
+        ax.plot(self.instant_regret_history)
+        ax.set_xlabel('Episode')
+        ax.set_ylabel('Instant Regret')
+        ax.set_title('Instant Regret per Episode')
+        ax.grid(True, alpha=0.3)
+        
+        # 평균 regret
+        ax = axes[1, 0]
+        avg_regret = [self.cumulative_regret_history[i] / (i + 1) 
+                     for i in range(len(self.cumulative_regret_history))]
+        ax.plot(avg_regret)
+        ax.set_xlabel('Episode')
+        ax.set_ylabel('Average Regret')
+        ax.set_title('Average Regret over Time')
+        ax.grid(True, alpha=0.3)
+        
+        # Regret 비율
+        ax = axes[1, 1]
+        regret_ratios = [self.cumulative_regret_history[i] / theoretical_bounds[i] 
+                        if theoretical_bounds[i] > 0 else 0 
+                        for i in range(len(self.cumulative_regret_history))]
+        ax.plot(regret_ratios)
+        ax.set_xlabel('Episode')
+        ax.set_ylabel('Regret Ratio')
+        ax.set_title('Actual / Theoretical Regret')
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Regret analysis plot saved to: {save_path}")
+        else:
+            plt.show()
+        
+        plt.close()    
 
 # Scenario evaluation class
 class EXP3ModelEvaluator:

@@ -23,7 +23,7 @@
   
   "nues": 400,
   "h_UT": 1.5,
-  "until": 500,
+  "until": 15000,
   "base_interval": 1.0,
   "mcs_table_number": null,
   "ue_noise_power_dBm": -118,
@@ -38,7 +38,7 @@
   },
   "exp3_n_cells_off": 3,
   "exp3_gamma": 0.3,
-  "exp3_warmup_episodes": 100,
+  "exp3_warmup_episodes": 500,
   "exp3_enable_warmup": true,
   "exp3_ensure_min_selection": true,
   "exp3_linear_power_model": false,
