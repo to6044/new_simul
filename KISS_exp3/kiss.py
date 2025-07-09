@@ -1516,26 +1516,40 @@ def main(config_dict):
     if scenario_profile == "exp3_cell_on_off":
         # 설정에서 EXP3 파라미터 가져오기
         exp3_n_cells_off = config_dict.get("exp3_n_cells_off", 3)
-        exp3_gamma = config_dict.get("exp3_gamma", 0.1)
-        exp3_warmup_episodes = config_dict.get("exp3_warmup_episodes", 100)
+        exp3_gamma = config_dict.get("exp3_gamma", 0.15)  # 더 적극적인 탐험
+        exp3_warmup_episodes = config_dict.get("exp3_warmup_episodes", 50)  # 줄어든 웜업
         exp3_enable_warmup = config_dict.get("exp3_enable_warmup", True)
         exp3_ensure_min_selection = config_dict.get("exp3_ensure_min_selection", True)
-        exp3_linear_power_model = config_dict.get("exp3_linear_power_model", False)
-        exp3_power_model_k = config_dict.get("exp3_power_model_k", 0.05)
-        exp3_learning_log = config_dict.get("exp3_learning_log", None)
-        exp3_final_model = config_dict.get("exp3_final_model", None)
+        exp3_linear_power_model = config_dict.get("exp3_linear_power_model", True)  # 기본값을 True로
+        exp3_power_model_k = config_dict.get("exp3_power_model_k", 0.08)  # 조정된 계수
+        exp3_learning_log = config_dict.get("exp3_learning_log", "exp3_learning_progress.json")
+        exp3_final_model = config_dict.get("exp3_final_model", "exp3_trained_model.json")
         
-        # 로그 파일 경로 생성
+        # 로그 파일 경로 생성 (절대 경로로 수정)
         if exp3_learning_log:
-            exp3_learning_log = os.path.join(
+            exp3_learning_log_path = os.path.join(
                 os.path.dirname(data_output_logfile_path),
                 exp3_learning_log
             )
+        else:
+            exp3_learning_log_path = None
+            
         if exp3_final_model:
-            exp3_final_model = os.path.join(
+            exp3_final_model_path = os.path.join(
                 os.path.dirname(data_output_logfile_path),
                 exp3_final_model
             )
+        else:
+            exp3_final_model_path = None
+        
+        print(f"Initializing EXP3 Cell On/Off scenario:")
+        print(f"  - Cells to turn off: {exp3_n_cells_off}")
+        print(f"  - Gamma (exploration): {exp3_gamma}")
+        print(f"  - Warmup episodes: {exp3_warmup_episodes}")
+        print(f"  - Linear power model: {exp3_linear_power_model}")
+        print(f"  - Power model coefficient: {exp3_power_model_k}")
+        print(f"  - Learning log: {exp3_learning_log_path}")
+        print(f"  - Final model: {exp3_final_model_path}")
         
         # EXP3 시나리오 생성
         exp3_cell_on_off = EXP3CellOnOff(
@@ -1550,14 +1564,45 @@ def main(config_dict):
             ensure_min_selection=exp3_ensure_min_selection,
             linear_power_model=exp3_linear_power_model,
             power_model_k=exp3_power_model_k,
-            learning_log_file=exp3_learning_log,
-            final_model_file=exp3_final_model,
+            learning_log_file=exp3_learning_log_path,
+            final_model_file=exp3_final_model_path,
             verbose=True
         )
         
-        # 셀 에너지 모델 참조 설정
-        exp3_cell_on_off.set_cell_energy_models(cell_energy_models_dict)
-    
+        # 셀 에너지 모델 참조 설정 및 linear power model 메서드 추가
+        if 'cell_energy_models_dict' in locals():
+            exp3_cell_on_off.set_cell_energy_models(cell_energy_models_dict)
+            
+            # Linear power model 메서드를 각 CellEnergyModel에 추가
+            if exp3_linear_power_model:
+                for cell_id, energy_model in cell_energy_models_dict.items():
+                    # Linear power model 메서드 동적 추가
+                    def get_linear_power_watts(self, n_ues: int, k: float = 0.05) -> float:
+                        """
+                        Calculate cell power using linear model: P = P_idle + k * N_UE * 1000W
+                        """
+                        # Get idle power (static power)
+                        if hasattr(self.params, 'sectors') and hasattr(self.params, 'antennas'):
+                            p_idle = self.p_static_watts * self.params.sectors * self.params.antennas
+                        else:
+                            p_idle = self.p_static_watts * 3 * 2  # Default: 3 sectors, 2 antennas
+                        
+                        # Calculate dynamic power based on UE count
+                        p_dynamic = k * n_ues * 1000  # Convert to watts per UE
+                        
+                        # Total power with realistic bounds
+                        total_power = p_idle + p_dynamic
+                        
+                        # Bounds check: minimum 500W (sleep), maximum 5000W (full load)
+                        total_power = max(500, min(total_power, 5000))
+                        
+                        return total_power
+                    
+                    # 메서드를 인스턴스에 바인딩
+                    import types
+                    energy_model.get_linear_power_watts = types.MethodType(get_linear_power_watts, energy_model)
+        
+        print("EXP3CellOnOff scenario initialized successfully!")
     
      # EXP3 모델 평가 시나리오 (학습된 모델 적용용)
     exp3_evaluation = None
@@ -1565,20 +1610,44 @@ def main(config_dict):
         model_file = config_dict.get("exp3_model_file")
         if not model_file:
             raise ValueError("exp3_model_file must be specified for exp3_evaluation scenario")
+        
+        # 절대 경로로 변환
+        if not os.path.isabs(model_file):
+            model_file = os.path.join(os.path.dirname(data_output_logfile_path), model_file)
             
+        if not os.path.exists(model_file):
+            raise FileNotFoundError(f"EXP3 model file not found: {model_file}")
+        
         # 학습된 모델 로드
+        from exp3_cell_on_off import EXP3ModelEvaluator
         evaluator = EXP3ModelEvaluator(model_file)
         best_arm_idx, best_arm_cells = evaluator.get_best_arm()
         
-        print(f"Applying trained EXP3 model: Best arm {best_arm_idx}, turning off cells {best_arm_cells}")
+        print(f"Applying trained EXP3 model from: {model_file}")
+        print(f"Best arm {best_arm_idx}: turning off cells {best_arm_cells}")
         
-        # 최적 arm으로 SwitchNCellsOff 시나리오 사용
-        exp3_evaluation = SwitchNCellsOff(
+        # 최적 arm으로 고정 셀 끄기 시나리오 생성
+        class FixedCellOffScenario(Scenario):
+            def __init__(self, sim, target_cells, delay=0.0):
+                self.sim = sim
+                self.target_cells = target_cells
+                self.delay = delay
+                
+            def loop(self):
+                if self.delay > 0:
+                    yield self.sim.env.timeout(self.delay)
+                
+                print(f"Turning off cells: {self.target_cells}")
+                for cell_id in self.target_cells:
+                    if cell_id < len(self.sim.cells):
+                        self.sim.cells[cell_id].set_power_dBm(-np.inf)
+                
+        exp3_evaluation = FixedCellOffScenario(
             sim=sim,
-            delay=scenario_delay,
-            interval=base_interval,
-            n_cells=0  # 수동으로 셀 지정
+            target_cells=best_arm_cells,
+            delay=scenario_delay
         )
+
         # 최적 arm의 셀로 오버라이드
         exp3_evaluation.target_cells = best_arm_cells
     

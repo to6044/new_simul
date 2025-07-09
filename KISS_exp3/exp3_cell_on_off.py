@@ -1,8 +1,10 @@
 """
-EXP3 Algorithm-based Cell On/Off Scenario for KISS Network Simulator
+EXP3 Algorithm-based Cell On/Off Scenario for KISS Network Simulator - FIXED VERSION
 
-This module implements an EXP3 (Exponential-weight algorithm for Exploration and Exploitation)
-based cell on/off strategy for energy efficiency optimization in 5G networks.
+수정사항:
+1. 전력 측정 정확성 개선
+2. 보상 함수 동적 범위 확장  
+3. 로깅 및 디버깅 정보 개선
 """
 
 import numpy as np
@@ -115,6 +117,11 @@ class EXP3CellOnOff(Scenario):
         # Cell energy models reference
         self.cell_energy_models = None
         
+        # Reward statistics for dynamic normalization
+        self.efficiency_history = []
+        self.min_efficiency = float('inf')
+        self.max_efficiency = 0.0
+        
         if self.verbose:
             print(f"EXP3CellOnOff initialized: {k_cells} cells, turning off {n_cells_off} cells")
             print(f"Total arms (combinations): {self.n_arms}")
@@ -127,7 +134,7 @@ class EXP3CellOnOff(Scenario):
         
     def get_network_metrics(self) -> Tuple[float, float, float]:
         """
-        Calculate current network metrics.
+        Calculate current network metrics with improved power calculation.
         
         Returns:
         --------
@@ -137,65 +144,108 @@ class EXP3CellOnOff(Scenario):
         total_throughput = 0.0
         total_power = 0.0
         active_cells = 0
+        turned_off_cells = 0
         
+        # 개선된 전력 계산
         for cell in self.sim.cells:
-            # Skip cells that are turned off
-            if cell.power_dBm <= -100:  # Effectively off
+            # 셀이 꺼져있는지 확인 (더 정확한 조건)
+            is_cell_off = (cell.power_dBm == -np.inf or 
+                          cell.power_dBm < -50 or 
+                          not np.isfinite(cell.power_dBm))
+            
+            if is_cell_off:
+                turned_off_cells += 1
+                # 꺼진 셀도 최소한의 전력 소비 (sleep mode)
+                total_power += 0.1  # 100W sleep power
                 continue
                 
-            # Get cell throughput
-            cell_tp = cell.get_cell_throughput()
-            total_throughput += cell_tp
-            
-            # Get cell power
-            if self.cell_energy_models and cell.i in self.cell_energy_models:
-                energy_model = self.cell_energy_models[cell.i]
-                
-                try:
-                    # Use linear power model if enabled
-                    if self.linear_power_model and hasattr(energy_model, 'get_linear_power_watts'):
-                        n_ues = len(cell.attached)
-                        cell_power_watts = energy_model.get_linear_power_watts(n_ues, self.power_model_k)
-                    else:
-                        cell_power_watts = energy_model.get_cell_power_watts(self.sim.env.now)
-                    
-                    # Validate power value
-                    if np.isfinite(cell_power_watts) and cell_power_watts > 0:
-                        cell_power_kW = cell_power_watts / 1e3
-                        total_power += cell_power_kW
-                        active_cells += 1
-                except Exception as e:
+            # 활성 셀의 처리량 계산
+            try:
+                cell_tp = cell.get_cell_throughput()
+                if np.isfinite(cell_tp) and cell_tp >= 0:
+                    total_throughput += cell_tp
+                else:
                     if self.verbose:
-                        print(f"Warning: Failed to get power for cell {cell.i}: {e}")
-                    # Use default power estimation
-                    cell_power_watts = 2000  # 2kW default for active cell
-                    cell_power_kW = cell_power_watts / 1e3
-                    total_power += cell_power_kW
-                    active_cells += 1
-            else:
-                # Fallback: estimate power from power_dBm
-                if cell.power_dBm > -100:
-                    # Rough estimation: 43 dBm ≈ 2kW total consumption
-                    cell_power_kW = 2.0  # Default 2kW per active cell
-                    total_power += cell_power_kW
-                    active_cells += 1
+                        print(f"Warning: Invalid throughput for cell {cell.i}: {cell_tp}")
+            except Exception as e:
+                if self.verbose:
+                    print(f"Warning: Failed to get throughput for cell {cell.i}: {e}")
+            
+            # 활성 셀의 전력 계산
+            cell_power_kW = self._calculate_cell_power(cell)
+            if cell_power_kW > 0:
+                total_power += cell_power_kW
+                active_cells += 1
         
-        # Add minimum power to avoid division by zero
-        if total_power == 0:
-            # All cells might be off or power calculation failed
-            # Use number of active cells * minimum power
-            total_power = max(active_cells * 1.5, 0.1)  # At least 1.5kW per active cell
+        # 전력 검증 및 fallback
+        if total_power <= 0.5:  # 너무 낮은 전력값 방지
+            # 기본값: 활성 셀당 2kW + 꺼진 셀당 0.1kW
+            total_power = active_cells * 2.0 + turned_off_cells * 0.1
+            if self.verbose:
+                print(f"Warning: Using fallback power calculation. Active={active_cells}, Off={turned_off_cells}")
         
-        # Calculate efficiency (handle division by zero)
+        # 효율성 계산
         if total_power > 0:
             efficiency = (total_throughput * 1e6) / (total_power * 1e3)  # bits/J
         else:
             efficiency = 0.0
             
-        if self.verbose and self.episode_count % 10 == 0:
-            print(f"  Debug: Active cells={active_cells}, Total TP={total_throughput:.2f}, Total Power={total_power:.2f}")
+        # 효율성 통계 업데이트
+        if efficiency > 0:
+            self.efficiency_history.append(efficiency)
+            self.min_efficiency = min(self.min_efficiency, efficiency)
+            self.max_efficiency = max(self.max_efficiency, efficiency)
+            
+        if self.verbose and (self.episode_count % 10 == 0 or total_power < 1.0):
+            print(f"  Debug: Active={active_cells}, Off={turned_off_cells}, TP={total_throughput:.2f}, Power={total_power:.2f}")
             
         return total_throughput, total_power, efficiency
+    
+    def _calculate_cell_power(self, cell) -> float:
+        """
+        Calculate power consumption for a single cell.
+        
+        Parameters:
+        -----------
+        cell : Cell
+            Cell object
+            
+        Returns:
+        --------
+        float
+            Power consumption in kW
+        """
+        try:
+            # 에너지 모델이 있는 경우
+            if self.cell_energy_models and cell.i in self.cell_energy_models:
+                energy_model = self.cell_energy_models[cell.i]
+                
+                # 선형 전력 모델 사용
+                if self.linear_power_model and hasattr(energy_model, 'get_linear_power_watts'):
+                    n_ues = len(cell.attached) if hasattr(cell, 'attached') else 0
+                    cell_power_watts = energy_model.get_linear_power_watts(n_ues, self.power_model_k)
+                else:
+                    cell_power_watts = energy_model.get_cell_power_watts(self.sim.env.now)
+                
+                # 전력값 검증
+                if np.isfinite(cell_power_watts) and cell_power_watts > 0:
+                    return cell_power_watts / 1e3  # kW로 변환
+            
+            # Fallback: power_dBm 기반 추정
+            if hasattr(cell, 'power_dBm') and np.isfinite(cell.power_dBm):
+                # power_dBm을 기반으로 한 전력 추정
+                # 43 dBm ≈ 20W RF + 1980W 시스템 = 2000W 총 소비
+                rf_power_watts = 10 ** (cell.power_dBm / 10) / 1000  # dBm to W
+                system_power_watts = 1500 + rf_power_watts * 20  # 시스템 전력
+                total_power_watts = rf_power_watts + system_power_watts
+                return total_power_watts / 1e3  # kW로 변환
+                
+        except Exception as e:
+            if self.verbose:
+                print(f"Warning: Power calculation failed for cell {cell.i}: {e}")
+        
+        # 최종 fallback
+        return 2.0  # 기본 2kW
     
     def turn_cells_off(self, cell_indices: List[int]):
         """Turn off specified cells by setting their power to -inf"""
@@ -252,7 +302,7 @@ class EXP3CellOnOff(Scenario):
         
     def calculate_reward(self, efficiency: float) -> float:
         """
-        Calculate normalized reward based on network efficiency.
+        Calculate normalized reward with improved dynamic range.
         
         Parameters:
         -----------
@@ -267,19 +317,33 @@ class EXP3CellOnOff(Scenario):
         # Handle zero efficiency
         if efficiency <= 0:
             return 0.0
-            
-        # Use baseline for normalization if available
+        
+        # 동적 정규화 사용 (더 넓은 보상 범위)
         if self.baseline_efficiency is not None and self.baseline_efficiency > 0:
-            # Normalize relative to baseline
-            reward = efficiency / self.baseline_efficiency
-            # Clip to [0, 2] then scale to [0, 1]
-            reward = np.clip(reward, 0, 2) / 2
+            # 베이스라인 대비 상대적 성능
+            relative_efficiency = efficiency / self.baseline_efficiency
+            
+            # 더 부드러운 보상 함수: sigmoid 형태
+            if relative_efficiency >= 1.0:
+                # 베이스라인보다 좋을 때
+                improvement = relative_efficiency - 1.0
+                reward = 0.5 + 0.4 * (1 - np.exp(-improvement * 3))  # [0.5, 0.9]
+            else:
+                # 베이스라인보다 나쁠 때
+                degradation = 1.0 - relative_efficiency
+                reward = 0.5 * np.exp(-degradation * 2)  # [0, 0.5]
         else:
-            # Simple normalization without baseline
-            # Assume efficiency typically ranges from 0 to 2e5 bits/J
-            # (based on ~300 Mbps throughput and ~30 kW power)
-            typical_efficiency = 1e4  # 10,000 bits/J as a reasonable baseline
-            reward = np.clip(efficiency / typical_efficiency, 0, 1)
+            # 베이스라인이 없을 때 절대적 정규화
+            # 과거 효율성 데이터 기반 정규화
+            if len(self.efficiency_history) > 10:
+                # 동적 범위 사용
+                eff_range = max(self.max_efficiency - self.min_efficiency, 1000)
+                reward = (efficiency - self.min_efficiency) / eff_range
+                reward = np.clip(reward, 0, 1)
+            else:
+                # 고정 범위 사용 (초기)
+                typical_efficiency = 1e4  # 10,000 bits/J
+                reward = np.clip(efficiency / (typical_efficiency * 2), 0, 1)
             
         return float(reward)
     
@@ -297,8 +361,15 @@ class EXP3CellOnOff(Scenario):
         # Estimated reward for the selected arm
         estimated_reward = reward / self.probabilities[selected_arm]
         
-        # 학습률 스케일링 추가
-        learning_scale = 10.0  # 학습 속도 10배 증가
+        # 적응적 학습률
+        if len(self.reward_history) > 50:
+            # 최근 보상들의 분산을 기반으로 학습률 조정
+            recent_rewards = self.reward_history[-50:]
+            reward_variance = np.var(recent_rewards)
+            learning_scale = 1.0 + min(reward_variance * 10, 5.0)  # [1.0, 6.0]
+        else:
+            learning_scale = 1.0
+        
         # Update weight for selected arm
         self.weights[selected_arm] *= np.exp(self.gamma * estimated_reward * learning_scale / self.n_arms)
         
@@ -319,6 +390,9 @@ class EXP3CellOnOff(Scenario):
                 'cumulative_rewards': self.cumulative_rewards.tolist(),
                 'reward_history': self.reward_history,
                 'selected_arm_history': [int(x) for x in self.selected_arm_history],
+                'efficiency_history': self.efficiency_history[-100:],  # 최근 100개만 저장
+                'min_efficiency': float(self.min_efficiency) if self.min_efficiency != float('inf') else None,
+                'max_efficiency': float(self.max_efficiency),
                 'baseline_efficiency': float(self.baseline_efficiency) if self.baseline_efficiency else None,
                 'baseline_throughput': float(self.baseline_throughput) if self.baseline_throughput else None,
                 'baseline_power': float(self.baseline_power) if self.baseline_power else None
@@ -341,6 +415,8 @@ class EXP3CellOnOff(Scenario):
                 'cumulative_rewards': self.cumulative_rewards.tolist(),
                 'total_episodes': self.episode_count,
                 'baseline_efficiency': self.baseline_efficiency,
+                'min_efficiency': float(self.min_efficiency) if self.min_efficiency != float('inf') else None,
+                'max_efficiency': float(self.max_efficiency),
                 'training_completed': datetime.now().isoformat()
             }
             
@@ -359,38 +435,48 @@ class EXP3CellOnOff(Scenario):
         # Plot 1: Weight evolution for top 10 arms
         ax = axes[0, 0]
         weight_array = np.array(self.weight_history)
-        top_arms = np.argsort(self.weights)[-10:]
-        for arm_idx in top_arms:
-            ax.plot(weight_array[:, arm_idx], label=f'Arm {arm_idx}')
-        ax.set_xlabel('Episode')
-        ax.set_ylabel('Weight')
-        ax.set_title('Weight Evolution (Top 10 Arms)')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        if weight_array.shape[0] > 0:
+            # Show top 10 arms by final weight
+            final_weights = self.weights
+            top_arms = np.argsort(final_weights)[-10:]
+            
+            for arm_idx in top_arms:
+                weights_over_time = weight_array[:, arm_idx]
+                ax.plot(weights_over_time, label=f'Arm {arm_idx}')
+            
+            ax.set_xlabel('Learning Steps (×10 episodes)')
+            ax.set_ylabel('Weight')
+            ax.set_title('Weight Evolution (Top 10 Arms)')
+            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            ax.set_yscale('log')
         
-        # Plot 2: Probability distribution
+        # Plot 2: Reward history
         ax = axes[0, 1]
-        prob_array = np.array(self.probability_history)
-        if len(prob_array) > 0:
-            final_probs = prob_array[-1]
-            sorted_indices = np.argsort(final_probs)[-20:]  # Top 20 arms
-            ax.bar(range(len(sorted_indices)), final_probs[sorted_indices])
-            ax.set_xlabel('Arm Index (sorted)')
-            ax.set_ylabel('Selection Probability')
-            ax.set_title('Final Probability Distribution (Top 20)')
-        
-        # Plot 3: Reward history
-        ax = axes[1, 0]
         if len(self.reward_history) > 0:
             ax.plot(self.reward_history)
-            # Add moving average
-            window = min(50, len(self.reward_history) // 10)
-            if window > 1:
-                ma = np.convolve(self.reward_history, np.ones(window)/window, mode='valid')
-                ax.plot(range(window-1, len(self.reward_history)), ma, 'r-', linewidth=2, label=f'{window}-episode MA')
             ax.set_xlabel('Episode')
             ax.set_ylabel('Reward')
             ax.set_title('Reward History')
-            ax.legend()
+            
+            # Moving average
+            if len(self.reward_history) > 10:
+                window = min(20, len(self.reward_history) // 5)
+                moving_avg = np.convolve(self.reward_history, np.ones(window)/window, mode='valid')
+                ax.plot(range(window-1, len(self.reward_history)), moving_avg, 'r-', linewidth=2, label='Moving Average')
+                ax.legend()
+        
+        # Plot 3: Efficiency evolution
+        ax = axes[1, 0]
+        if len(self.efficiency_history) > 0:
+            ax.plot(self.efficiency_history)
+            ax.set_xlabel('Episode')
+            ax.set_ylabel('Efficiency (bits/J)')
+            ax.set_title('Network Efficiency Over Time')
+            
+            if self.baseline_efficiency:
+                ax.axhline(y=self.baseline_efficiency, color='r', linestyle='--', 
+                          label=f'Baseline: {self.baseline_efficiency:.0f}')
+                ax.legend()
         
         # Plot 4: Arm selection frequency
         ax = axes[1, 1]
@@ -432,11 +518,15 @@ class EXP3CellOnOff(Scenario):
         self.baseline_efficiency = baseline_eff
         
         # Validate baseline
-        if baseline_pwr <= 0 or np.isnan(baseline_pwr):
-            print(f"Warning: Invalid baseline power. Using default values.")
-            # Estimate based on 19 cells * 2kW average
-            self.baseline_power = 38.0  # kW
-            self.baseline_efficiency = (baseline_tp * 1e6) / (self.baseline_power * 1e3) if baseline_tp > 0 else 1e4
+        if baseline_pwr <= 1.0 or np.isnan(baseline_pwr):
+            print(f"Warning: Suspicious baseline power ({baseline_pwr:.2f} kW). Adjusting...")
+            # 더 현실적인 베이스라인 추정
+            estimated_power = len(self.sim.cells) * 2.0  # 셀당 2kW
+            self.baseline_power = estimated_power
+            if baseline_tp > 0:
+                self.baseline_efficiency = (baseline_tp * 1e6) / (estimated_power * 1e3)
+            else:
+                self.baseline_efficiency = 1e4  # 기본값
         
         print(f"Baseline: Throughput={self.baseline_throughput:.2f} Mbps, Power={self.baseline_power:.2f} kW, Efficiency={self.baseline_efficiency:.2e} bits/J")
         print(f"{'='*60}\n")
@@ -481,7 +571,7 @@ class EXP3CellOnOff(Scenario):
                 
             # Display current results
             print(f"  Network state: TP={throughput:.2f} Mbps, Power={power:.2f} kW, Eff={efficiency:.2e} bits/J")
-            print(f"  Reward: {reward:.4f}")
+            print(f"  Reward: {reward:.4f} (Relative Eff: {efficiency/self.baseline_efficiency:.3f})")
             
             # Show top arms every 10 episodes
             if self.episode_count % 10 == 0:
@@ -498,10 +588,13 @@ class EXP3CellOnOff(Scenario):
             # Log progress and save
             if self.episode_count % 50 == 0:
                 avg_reward = np.mean(self.reward_history[-50:]) if len(self.reward_history) >= 50 else np.mean(self.reward_history)
+                avg_efficiency = np.mean(self.efficiency_history[-50:]) if len(self.efficiency_history) >= 50 else np.mean(self.efficiency_history)
                 print(f"\n{'='*60}")
                 print(f"Progress Summary - Episode {self.episode_count}")
                 print(f"Average Reward (last 50): {avg_reward:.4f}")
+                print(f"Average Efficiency (last 50): {avg_efficiency:.2e} bits/J")
                 print(f"Best arm so far: {np.argmax(self.weights)} -> cells {list(self.arms[np.argmax(self.weights)])}")
+                print(f"Efficiency range: [{self.min_efficiency:.2e}, {self.max_efficiency:.2e}]")
                 print(f"{'='*60}\n")
                 
                 try:
@@ -522,6 +615,7 @@ class EXP3CellOnOff(Scenario):
                 print(f"\n{'='*60}")
                 print(f"EXP3CellOnOff learning completed after {self.episode_count} episodes")
                 print(f"Final best arm: {np.argmax(self.weights)} -> cells {list(self.arms[np.argmax(self.weights)])}")
+                print(f"Final efficiency range: [{self.min_efficiency:.2e}, {self.max_efficiency:.2e}]")
                 print(f"{'='*60}\n")
                 
                 try:
@@ -532,49 +626,6 @@ class EXP3CellOnOff(Scenario):
                     print(f"Warning: Failed to save final results: {e}")
                     
                 break
-
-
-# Extension to CellEnergyModel for linear power model
-def extend_cell_energy_model(CellEnergyModel):
-    """
-    Extend CellEnergyModel class with linear power model method
-    
-    Parameters:
-    -----------
-    CellEnergyModel : class
-        The CellEnergyModel class to extend
-    """
-    
-    def get_linear_power_watts(self, n_ues: int, k: float = 0.05) -> float:
-        """
-        Calculate cell power using linear model: P = P_idle + k * N_UE
-        
-        Parameters:
-        -----------
-        n_ues : int
-            Number of UEs attached to the cell
-        k : float
-            Linear coefficient (default: 0.05)
-            
-        Returns:
-        --------
-        float
-            Power consumption in watts
-        """
-        # Get idle power (static power)
-        p_idle = self.p_static_watts * self.params.sectors * self.params.antennas
-        
-        # Calculate dynamic power based on UE count
-        p_dynamic = k * n_ues * 1000  # Convert to watts
-        
-        # Total power
-        total_power = p_idle + p_dynamic
-        
-        return total_power
-    
-    # Add method to CellEnergyModel class
-    if hasattr(CellEnergyModel, '__init__'):
-        CellEnergyModel.get_linear_power_watts = get_linear_power_watts
 
 
 # Scenario evaluation class
@@ -610,26 +661,56 @@ class EXP3ModelEvaluator:
         for idx in top_indices:
             results.append((idx, list(self.arms[idx]), self.weights[idx]))
         return results
+
+
+# Extension function for CellEnergyModel
+def extend_cell_energy_model(CellEnergyModel):
+    """
+    Extend CellEnergyModel class with linear power model method
     
-    def evaluate_on_simulation(self, sim, duration: float = 100.0) -> Dict:
+    Parameters:
+    -----------
+    CellEnergyModel : class
+        The CellEnergyModel class to extend
+    """
+    
+    def get_linear_power_watts(self, n_ues: int, k: float = 0.05) -> float:
         """
-        Evaluate the trained model on a simulation
+        Calculate cell power using linear model: P = P_idle + k * N_UE
         
         Parameters:
         -----------
-        sim : Simv2
-            Simulation object
-        duration : float
-            Duration to run evaluation (default: 100.0)
+        n_ues : int
+            Number of UEs attached to the cell
+        k : float
+            Linear coefficient (default: 0.05)
             
         Returns:
         --------
-        Dict
-            Evaluation results
+        float
+            Power consumption in watts
         """
-        # This would be implemented as a separate scenario class
-        # that applies the learned policy without updating weights
-        pass
+        # Get idle power (static power)
+        if hasattr(self, 'params'):
+            if hasattr(self.params, 'sectors') and hasattr(self.params, 'antennas'):
+                p_idle = self.p_static_watts * self.params.sectors * self.params.antennas
+            else:
+                p_idle = self.p_static_watts * 3 * 2  # Default: 3 sectors, 2 antennas
+        else:
+            p_idle = getattr(self, 'p_static_watts', 130) * 3 * 2  # Default macro cell
+        
+        # Calculate dynamic power based on UE count
+        p_dynamic = k * n_ues * 1000  # Convert to watts
+        
+        # Total power with bounds
+        total_power = p_idle + p_dynamic
+        total_power = max(500, min(total_power, 5000))  # 0.5kW to 5kW bounds
+        
+        return total_power
+    
+    # Add method to CellEnergyModel class
+    if hasattr(CellEnergyModel, '__init__'):
+        CellEnergyModel.get_linear_power_watts = get_linear_power_watts
 
 
 # Helper function to add the scenario to configuration
@@ -640,46 +721,51 @@ def add_exp3_scenario_to_config(config_dict: dict,
                                 enable_warmup: bool = True,
                                 ensure_min_selection: bool = True,
                                 linear_power_model: bool = False,
-                                power_model_k: float = 0.05) -> dict:
+                                power_model_k: float = 0.05,
+                                learning_log: str = "exp3_learning_progress.json",
+                                final_model: str = "exp3_trained_model.json") -> dict:
     """
     Add EXP3 scenario parameters to configuration dictionary
     
     Parameters:
     -----------
     config_dict : dict
-        Original configuration dictionary
+        Configuration dictionary to modify
     n_cells_off : int
-        Number of cells to turn off
+        Number of cells to turn off (default: 3)
     gamma : float
-        EXP3 exploration parameter
+        EXP3 exploration parameter (default: 0.1)
     warmup_episodes : int
-        Number of warm-up episodes
+        Number of warm-up episodes (default: 100)
     enable_warmup : bool
-        Whether to enable warm-up
+        Whether to enable warm-up (default: True)
     ensure_min_selection : bool
-        Whether to ensure minimum selection
+        Whether to ensure minimum selection (default: True)
     linear_power_model : bool
-        Whether to use linear power model
+        Whether to use linear power model (default: False)
     power_model_k : float
-        Linear power model coefficient
+        Linear power model coefficient (default: 0.05)
+    learning_log : str
+        Learning progress log file (default: "exp3_learning_progress.json")
+    final_model : str
+        Final model file (default: "exp3_trained_model.json")
         
     Returns:
     --------
     dict
-        Updated configuration dictionary
+        Modified configuration dictionary
     """
-    exp3_params = {
-        "scenario_profile": "exp3_cell_on_off",
-        "exp3_n_cells_off": n_cells_off,
-        "exp3_gamma": gamma,
-        "exp3_warmup_episodes": warmup_episodes,
-        "exp3_enable_warmup": enable_warmup,
-        "exp3_ensure_min_selection": ensure_min_selection,
-        "exp3_linear_power_model": linear_power_model,
-        "exp3_power_model_k": power_model_k,
-        "exp3_learning_log": "exp3_learning_log.json",
-        "exp3_final_model": "exp3_final_model.json"
-    }
+    config_dict.update({
+        'scenario_profile': 'exp3_cell_on_off',
+        'exp3_n_cells_off': n_cells_off,
+        'exp3_gamma': gamma,
+        'exp3_warmup_episodes': warmup_episodes,
+        'exp3_enable_warmup': enable_warmup,
+        'exp3_ensure_min_selection': ensure_min_selection,
+        'exp3_linear_power_model': linear_power_model,
+        'exp3_power_model_k': power_model_k,
+        'exp3_learning_log': learning_log,
+        'exp3_final_model': final_model
+    })
     
-    config_dict.update(exp3_params)
     return config_dict
