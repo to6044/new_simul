@@ -297,8 +297,10 @@ class EXP3CellOnOff(Scenario):
         # Estimated reward for the selected arm
         estimated_reward = reward / self.probabilities[selected_arm]
         
+        # 학습률 스케일링 추가
+        learning_scale = 10.0  # 학습 속도 10배 증가
         # Update weight for selected arm
-        self.weights[selected_arm] *= np.exp(self.gamma * estimated_reward / self.n_arms)
+        self.weights[selected_arm] *= np.exp(self.gamma * estimated_reward * learning_scale / self.n_arms)
         
         # Prevent numerical overflow
         max_weight = np.max(self.weights)

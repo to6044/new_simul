@@ -37,7 +37,7 @@
     "SetCellSleep_bedtime_stories": []
   },
   "exp3_n_cells_off": 3,
-  "exp3_gamma": 0.1,
+  "exp3_gamma": 0.3,
   "exp3_warmup_episodes": 100,
   "exp3_enable_warmup": true,
   "exp3_ensure_min_selection": true,
