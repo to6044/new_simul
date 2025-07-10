@@ -36,7 +36,7 @@
     "SetCellSleep_interval": 1.0,
     "SetCellSleep_bedtime_stories": []
   },
-  "exp3_model_file": ".",
+  "exp3_model_file": "/home/hoseong/workspace/newsimul/KISS_exp3/_/data/output/exp3_cell_optimization_training_fixed/2025_07_09/exp3_trained_model_fixed.json",
   
   "mme_cqi_limit": 1,
   "mme_strategy": "best_sinr_cell",

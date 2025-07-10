@@ -50,8 +50,7 @@ def create_logfile_path(config_dict, debug_logger: bool = False):
         [
             acronym,
             "s" + str(config_dict['seed']),
-            "p" + str(config_dict['variable_cell_power_dBm']),
-            time_now,
+            "p" + str(config_dict['variable_cell_power_dBm'])
         ])
     else:
         if config_dict['scenario_n_cells'] < 10:
@@ -74,10 +73,10 @@ def create_logfile_path(config_dict, debug_logger: bool = False):
     if config_dict["experiment_description"].startswith("test_"):
         logfile_path = f"{project_root_dir}/_test/data/output/{experiment_description}/{date_now}/".replace(".", "_")
     else:
-        logfile_path = f"{project_root_dir}/data/output/{experiment_description}/{date_now}/".replace(".", "_")
+        logfile_path = f"{project_root_dir}/data/output/{experiment_description}/{date_now}/{time_now}/".replace(".", "_")
     
     if not os.path.exists(logfile_path):
-        os.makedirs(os.path.dirname(logfile_path), exist_ok=True)
+        os.makedirs(logfile_path, exist_ok=True)
 
     logfile_path = os.path.join(logfile_path, logfile_name)
 

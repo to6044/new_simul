@@ -404,18 +404,29 @@ class EXP3CellOnOff(Scenario):
                 'baseline_efficiency': float(self.baseline_efficiency) if self.baseline_efficiency else None,
                 'baseline_throughput': float(self.baseline_throughput) if self.baseline_throughput else None,
                 'baseline_power': float(self.baseline_power) if self.baseline_power else None,
-                'cumulative_regret': float(self.cumulative_regret),
+                # Regret 정보 추가
+                'regret_statistics': regret_stats,
                 'cumulative_regret_history': self.cumulative_regret_history[-100:],  # 최근 100개
-                'instant_regret_history': self.instant_regret_history[-100:],
-                'regret_statistics': regret_stats
+                'instant_regret_history': self.instant_regret_history[-100:],  # 최근 100개
+                'cumulative_regret': self.cumulative_regret,
+                'average_regret': self.cumulative_regret / self.episode_count if self.episode_count > 0 else 0
             }
             
-            with open(self.learning_log_file, 'w') as f:
-                json.dump(progress_data, f, indent=2)
+            # 파일 저장
+            try:
+                os.makedirs(os.path.dirname(self.learning_log_file), exist_ok=True)
+                with open(self.learning_log_file, 'w') as f:
+                    json.dump(progress_data, f, indent=2)
+            except Exception as e:
+                if self.verbose:
+                    print(f"Warning: Failed to save progress: {e}")
                 
     def save_final_model(self):
         """Save final trained model"""
         if self.final_model_file:
+            # 최종 regret 통계
+            final_regret_stats = self.get_regret_statistics()
+            
             model_data = {
                 'k_cells': self.k_cells,
                 'n_cells_off': self.n_cells_off,
@@ -429,13 +440,21 @@ class EXP3CellOnOff(Scenario):
                 'baseline_efficiency': self.baseline_efficiency,
                 'min_efficiency': float(self.min_efficiency) if self.min_efficiency != float('inf') else None,
                 'max_efficiency': float(self.max_efficiency),
-                'training_completed': datetime.now().isoformat()
+                'training_completed': datetime.now().isoformat(),
+                # Regret 정보 추가
+                'final_regret_statistics': final_regret_stats,
+                'final_cumulative_regret': self.cumulative_regret,
+                'final_average_regret': self.cumulative_regret / self.episode_count if self.episode_count > 0 else 0,
+                'theoretical_regret_bound': self.calculate_theoretical_regret_bound()
             }
             
-            with open(self.final_model_file, 'w') as f:
-                json.dump(model_data, f, indent=2)
-                
-            print(f"Final model saved to: {self.final_model_file}")
+            try:
+                os.makedirs(os.path.dirname(self.final_model_file), exist_ok=True)
+                with open(self.final_model_file, 'w') as f:
+                    json.dump(model_data, f, indent=2)
+                print(f"Final model saved to: {self.final_model_file}")
+            except Exception as e:
+                print(f"Warning: Failed to save final model: {e}")
             
     def plot_learning_progress(self, save_path: str = None):
         """Generate plots showing learning progress"""
@@ -578,7 +597,6 @@ class EXP3CellOnOff(Scenario):
             self.selected_arm_history.append(selected_arm)
             self.update_regret_tracking(selected_arm, reward)
 
-            
             # Update EXP3 weights (only after warm-up)
             if self.episode_count > self.warmup_episodes:
                 self.update_weights(selected_arm, reward)

@@ -23,7 +23,7 @@
   
   "nues": 400,
   "h_UT": 1.5,
-  "until": 5000,
+  "until": 10000,
   "base_interval": 1.0,
   "mcs_table_number": null,
   "ue_noise_power_dBm": -118,
