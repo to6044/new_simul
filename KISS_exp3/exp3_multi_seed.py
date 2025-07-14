@@ -3,7 +3,7 @@
 EXP3 Multi-seed Evaluation Script
 온라인 러닝 평가를 위한 다중 시드 실험 관리 스크립트
 
-python exp3_multi_seed_evaluation.py -c data/input/exp3_cell_on_off/exp3_training_fixed.json
+python exp3_multi_seed.py -c data/input/exp3_cell_on_off/exp3_training_fixed.json
 
 
 
