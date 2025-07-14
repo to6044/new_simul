@@ -9,7 +9,8 @@
 *.log
 *.log
 *.feather
-KISS/__pycache__
+KISS_exp3/__pycache__
+KISS_exp3/_
 *.pyc
 *.fea
 *.pstats
