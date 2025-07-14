@@ -1,10 +1,8 @@
 """
 EXP3 Algorithm-based Cell On/Off Scenario for KISS Network Simulator - FIXED VERSION
 
-수정사항:
-1. 전력 측정 정확성 개선
-2. 보상 함수 동적 범위 확장  
-3. 로깅 및 디버깅 정보 개선
+
+python run_kiss.py -c data/input/exp3_cell_on_off/exp3_training_fixed.json
 """
 
 import numpy as np
@@ -85,6 +83,15 @@ class EXP3CellOnOff(Scenario):
         self.cumulative_regret = 0.0
         self.oracle_cumulative_reward = 0.0  # 최적 arm의 누적 보상
         self.actual_cumulative_reward = 0.0  # 실제 얻은 누적 보상    
+        
+        # 추가 메트릭 추적 변수
+        self.energy_consumption_history = []  # 에너지 소비 이력
+        self.throughput_history = []  # 셀 throughput 이력
+        self.cell_states_history = []  # 셀 상태 이력
+        self.switching_count = 0  # 전환 횟수
+        self.last_selected_arm = None  # 마지막 선택된 arm
+        self.baseline_energy_consumption = None  # 베이스라인 에너지 소비
+        self.random_baseline_efficiency = None  # 랜덤 on/off 베이스라인
 
         # Create log directory if needed
         if learning_log_file:
@@ -207,6 +214,141 @@ class EXP3CellOnOff(Scenario):
             print(f"  Debug: Active={active_cells}, Off={turned_off_cells}, TP={total_throughput:.2f}, Power={total_power:.2f}")
             
         return total_throughput, total_power, efficiency
+    
+    
+    def calculate_energy_metrics(self) -> Dict[str, float]:
+        """
+        에너지 관련 메트릭 계산
+        
+        Returns:
+        --------
+        dict
+            에너지 소비, 절감율 등
+        """
+        current_power = 0.0
+        active_cells = 0
+        
+        # 각 셀의 전력 소비 계산
+        for cell_id, cell in enumerate(self.sim.cells):
+            if hasattr(cell, 'tx_power_dBm') and cell.tx_power_dBm > 0:
+                # 선형 또는 비선형 전력 모델 적용
+                if self.linear_power_model:
+                    # 선형 모델: P_total = P_tx + k * P_tx
+                    tx_power_watts = 10 ** (cell.tx_power_dBm / 10) / 1000
+                    cell_power = tx_power_watts * (1 + self.power_model_k)
+                else:
+                    # 비선형 모델 (더 현실적)
+                    tx_power_watts = 10 ** (cell.tx_power_dBm / 10) / 1000
+                    # 고정 오버헤드 + 동적 전력
+                    cell_power = 0.5 + tx_power_watts * (1 + self.power_model_k)
+                
+                current_power += cell_power
+                active_cells += 1
+        
+        # 베이스라인 에너지 (모든 셀 켜짐)
+        if self.baseline_energy_consumption is None:
+            self.baseline_energy_consumption = current_power * (self.k_cells / max(active_cells, 1))
+        
+        # 에너지 절감율 계산
+        energy_saving_all_on = 0.0
+        if self.baseline_energy_consumption > 0:
+            energy_saving_all_on = (1 - current_power / self.baseline_energy_consumption) * 100
+        
+        # 랜덤 베이스라인 대비 절감율 (평균 50% 셀 off 가정)
+        random_baseline = self.baseline_energy_consumption * 0.75  # 평균적으로 75% 전력 사용
+        energy_saving_random = 0.0
+        if random_baseline > 0:
+            energy_saving_random = (1 - current_power / random_baseline) * 100
+        
+        return {
+            'current_power_kw': current_power,
+            'active_cells': active_cells,
+            'energy_saving_all_on': energy_saving_all_on,
+            'energy_saving_random': energy_saving_random,
+            'baseline_power_kw': self.baseline_energy_consumption
+        }
+    
+    def calculate_throughput_metrics(self) -> Dict[str, float]:
+        """
+        Throughput 관련 메트릭 계산
+        
+        Returns:
+        --------
+        dict
+            평균 셀 throughput, 총 throughput 등
+        """
+        total_throughput = 0.0
+        active_cells = 0
+        cell_throughputs = []
+        
+        # 각 UE의 throughput 합산
+        for ue in self.sim.UEs:
+            if hasattr(ue, 'attached_cell') and ue.attached_cell is not None:
+                # UE의 data rate 추정 (Shannon capacity 기반)
+                if hasattr(ue, 'SINR_dB') and ue.SINR_dB is not None:
+                    sinr_linear = 10 ** (ue.SINR_dB / 10)
+                    # Shannon capacity: C = B * log2(1 + SINR)
+                    # B = 20 MHz 가정
+                    bandwidth_hz = 20e6
+                    capacity_bps = bandwidth_hz * np.log2(1 + sinr_linear)
+                    total_throughput += capacity_bps
+        
+        # 활성 셀 수 계산
+        for cell in self.sim.cells:
+            if hasattr(cell, 'tx_power_dBm') and cell.tx_power_dBm > 0:
+                active_cells += 1
+                # 셀별 throughput 추정 (연결된 UE 수 기반)
+                cell_ue_count = sum(1 for ue in self.sim.UEs 
+                                  if hasattr(ue, 'attached_cell') and ue.attached_cell == cell)
+                if cell_ue_count > 0:
+                    cell_throughput = total_throughput * (cell_ue_count / len(self.sim.UEs))
+                    cell_throughputs.append(cell_throughput)
+        
+        avg_cell_throughput = np.mean(cell_throughputs) if cell_throughputs else 0
+        
+        return {
+            'total_throughput_gbps': total_throughput / 1e9,
+            'avg_cell_throughput_gbps': avg_cell_throughput / 1e9,
+            'active_cells': active_cells,
+            'throughput_per_active_cell': (total_throughput / active_cells / 1e9) if active_cells > 0 else 0
+        }
+    
+    def update_switching_cost(self, selected_arm: int):
+        """전환 비용 업데이트"""
+        if self.last_selected_arm is not None and self.last_selected_arm != selected_arm:
+            self.switching_count += 1
+        self.last_selected_arm = selected_arm
+    
+    def is_converged(self, window_size: int = 50, threshold: float = 0.01) -> bool:
+        """
+        가중치 분포가 수렴했는지 확인
+        
+        Parameters:
+        -----------
+        window_size : int
+            확인할 윈도우 크기
+        threshold : float
+            수렴 판단 임계값
+            
+        Returns:
+        --------
+        bool
+            수렴 여부
+        """
+        if len(self.probability_history) < window_size:
+            return False
+        
+        recent_probs = self.probability_history[-window_size:]
+        prob_changes = []
+        
+        for i in range(1, len(recent_probs)):
+            change = np.mean(np.abs(recent_probs[i] - recent_probs[i-1]))
+            prob_changes.append(change)
+        
+        return np.mean(prob_changes) < threshold
+
+    
+    
     
     def _calculate_cell_power(self, cell) -> float:
         """
@@ -387,9 +529,46 @@ class EXP3CellOnOff(Scenario):
             
     def save_learning_progress(self):
         """Save current learning progress to file"""
+        
         if self.learning_log_file:
-            regret_stats = self.get_regret_statistics()
+            # 수렴 에피소드 찾기
+            convergence_episode = -1
+            for i in range(50, self.episode_count, 10):
+                if self.is_converged(window_size=50, threshold=0.01):
+                    convergence_episode = i
+                    break
+            
+            # 에너지 및 throughput 통계
+            energy_stats = {}
+            throughput_stats = {}
+            
+            if self.energy_consumption_history:
+                recent_energy = self.energy_consumption_history[-100:]
+                energy_savings_all = [e['energy_saving_all_on'] for e in recent_energy]
+                energy_savings_random = [e['energy_saving_random'] for e in recent_energy]
+                
+                energy_stats = {
+                    'avg_energy_saving_all_on': np.mean(energy_savings_all),
+                    'avg_energy_saving_random': np.mean(energy_savings_random),
+                    'std_energy_saving': np.std(energy_savings_all),
+                    'max_energy_saving': np.max(energy_savings_all),
+                    'current_power_kw': recent_energy[-1]['current_power_kw']
+                }
+            
+            if self.throughput_history:
+                recent_throughput = self.throughput_history[-100:]
+                avg_throughputs = [t['avg_cell_throughput_gbps'] for t in recent_throughput]
+                total_throughputs = [t['total_throughput_gbps'] for t in recent_throughput]
+                
+                throughput_stats = {
+                    'avg_cell_throughput_gbps': np.mean(avg_throughputs),
+                    'total_throughput_gbps': np.mean(total_throughputs),
+                    'std_cell_throughput': np.std(avg_throughputs),
+                    'throughput_per_active_cell': recent_throughput[-1]['throughput_per_active_cell']
+                }
+                
             progress_data = {
+                # ... 기존 필드들 ...
                 'episode': int(self.episode_count),
                 'timestamp': float(self.sim.env.now),
                 'weights': self.weights.tolist(),
@@ -398,18 +577,27 @@ class EXP3CellOnOff(Scenario):
                 'cumulative_rewards': self.cumulative_rewards.tolist(),
                 'reward_history': self.reward_history,
                 'selected_arm_history': [int(x) for x in self.selected_arm_history],
-                'efficiency_history': self.efficiency_history[-100:],  # 최근 100개만 저장
+                
+                # 추가 메트릭
+                'energy_statistics': energy_stats,
+                'throughput_statistics': throughput_stats,
+                'switching_count': self.switching_count,
+                'switching_rate': self.switching_count / self.episode_count if self.episode_count > 0 else 0,
+                'convergence_episode': convergence_episode,
+                'is_converged': self.is_converged(),
+                
+                # Regret 정보
+                'regret_statistics': self.get_regret_statistics(),
+                'cumulative_regret_history': self.cumulative_regret_history[-100:],
+                'instant_regret_history': self.instant_regret_history[-100:],
+                
+                # 기존 메트릭
+                'efficiency_history': self.efficiency_history[-100:],
                 'min_efficiency': float(self.min_efficiency) if self.min_efficiency != float('inf') else None,
                 'max_efficiency': float(self.max_efficiency),
                 'baseline_efficiency': float(self.baseline_efficiency) if self.baseline_efficiency else None,
                 'baseline_throughput': float(self.baseline_throughput) if self.baseline_throughput else None,
-                'baseline_power': float(self.baseline_power) if self.baseline_power else None,
-                # Regret 정보 추가
-                'regret_statistics': regret_stats,
-                'cumulative_regret_history': self.cumulative_regret_history[-100:],  # 최근 100개
-                'instant_regret_history': self.instant_regret_history[-100:],  # 최근 100개
-                'cumulative_regret': self.cumulative_regret,
-                'average_regret': self.cumulative_regret / self.episode_count if self.episode_count > 0 else 0
+                'baseline_power': float(self.baseline_power) if self.baseline_power else None
             }
             
             # 파일 저장
@@ -419,15 +607,37 @@ class EXP3CellOnOff(Scenario):
                     json.dump(progress_data, f, indent=2)
             except Exception as e:
                 if self.verbose:
-                    print(f"Warning: Failed to save progress: {e}")
+                    print(f"Warning: Failed to save progress: {e}") 
                 
     def save_final_model(self):
-        """Save final trained model"""
+        """확장된 최종 모델 저장"""
         if self.final_model_file:
-            # 최종 regret 통계
-            final_regret_stats = self.get_regret_statistics()
+            # 최종 통계 계산
+            final_energy_stats = {}
+            final_throughput_stats = {}
+            
+            if self.energy_consumption_history:
+                all_energy_savings = [e['energy_saving_all_on'] for e in self.energy_consumption_history]
+                final_energy_stats = {
+                    'mean_energy_saving': np.mean(all_energy_savings),
+                    'std_energy_saving': np.std(all_energy_savings),
+                    'max_energy_saving': np.max(all_energy_savings),
+                    'min_energy_saving': np.min(all_energy_savings),
+                    'final_energy_saving': all_energy_savings[-1] if all_energy_savings else 0
+                }
+            
+            if self.throughput_history:
+                all_avg_throughputs = [t['avg_cell_throughput_gbps'] for t in self.throughput_history]
+                final_throughput_stats = {
+                    'mean_avg_cell_throughput': np.mean(all_avg_throughputs),
+                    'std_avg_cell_throughput': np.std(all_avg_throughputs),
+                    'max_avg_cell_throughput': np.max(all_avg_throughputs),
+                    'min_avg_cell_throughput': np.min(all_avg_throughputs),
+                    'final_avg_cell_throughput': all_avg_throughputs[-1] if all_avg_throughputs else 0
+                }
             
             model_data = {
+                # ... 기존 필드들 ...
                 'k_cells': self.k_cells,
                 'n_cells_off': self.n_cells_off,
                 'gamma': self.gamma,
@@ -437,25 +647,56 @@ class EXP3CellOnOff(Scenario):
                 'arm_selection_count': self.arm_selection_count.tolist(),
                 'cumulative_rewards': self.cumulative_rewards.tolist(),
                 'total_episodes': self.episode_count,
+                
+                # 추가된 최종 통계
+                'final_energy_statistics': final_energy_stats,
+                'final_throughput_statistics': final_throughput_stats,
+                'total_switching_count': self.switching_count,
+                'final_switching_rate': self.switching_count / self.episode_count if self.episode_count > 0 else 0,
+                'convergence_achieved': self.is_converged(),
+                'convergence_episode': self._find_convergence_episode(),
+                
+                # Regret 정보
+                'final_regret_statistics': self.get_regret_statistics(),
+                'final_cumulative_regret': self.cumulative_regret,
+                'final_average_regret': self.cumulative_regret / self.episode_count if self.episode_count > 0 else 0,
+                
+                # 기존 메트릭
                 'baseline_efficiency': self.baseline_efficiency,
                 'min_efficiency': float(self.min_efficiency) if self.min_efficiency != float('inf') else None,
                 'max_efficiency': float(self.max_efficiency),
-                'training_completed': datetime.now().isoformat(),
-                # Regret 정보 추가
-                'final_regret_statistics': final_regret_stats,
-                'final_cumulative_regret': self.cumulative_regret,
-                'final_average_regret': self.cumulative_regret / self.episode_count if self.episode_count > 0 else 0,
-                'theoretical_regret_bound': self.calculate_theoretical_regret_bound()
+                'training_completed': datetime.now().isoformat()
             }
             
+            # 파일 저장
             try:
                 os.makedirs(os.path.dirname(self.final_model_file), exist_ok=True)
                 with open(self.final_model_file, 'w') as f:
                     json.dump(model_data, f, indent=2)
                 print(f"Final model saved to: {self.final_model_file}")
             except Exception as e:
-                print(f"Warning: Failed to save final model: {e}")
+                print(f"Error saving final model: {e}")
+   
+   
+    def _find_convergence_episode(self) -> int:
+        """수렴 에피소드 찾기"""
+        window_size = 50
+        threshold = 0.01
+        
+        for i in range(window_size, len(self.probability_history), 10):
+            recent_probs = self.probability_history[i-window_size:i]
+            prob_changes = []
             
+            for j in range(1, len(recent_probs)):
+                change = np.mean(np.abs(recent_probs[j] - recent_probs[j-1]))
+                prob_changes.append(change)
+            
+            if np.mean(prob_changes) < threshold:
+                return i * 10  # probability_history는 10 에피소드마다 저장
+        
+        return -1      
+     
+     
     def plot_learning_progress(self, save_path: str = None):
         """Generate plots showing learning progress"""
         if len(self.weight_history) == 0:
@@ -582,6 +823,17 @@ class EXP3CellOnOff(Scenario):
             
             # Wait for system to stabilize and handovers to complete
             yield self.sim.env.timeout(self.interval * 2)
+            
+            # 추가 메트릭 계산
+            energy_metrics = self.calculate_energy_metrics()
+            throughput_metrics = self.calculate_throughput_metrics()
+            
+            # 이력에 추가
+            self.energy_consumption_history.append(energy_metrics)
+            self.throughput_history.append(throughput_metrics)
+            
+            # 전환 비용 업데이트
+            self.update_switching_cost(selected_arm)
             
             # Measure network performance
             throughput, power, efficiency = self.get_network_metrics()
