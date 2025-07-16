@@ -9,7 +9,7 @@
   "line_profiler": false,
   "sim_show_params": false,
   
-  "seed": 1,
+  "seed": 20,
   "isd": 500,
   "sim_radius": 1000,
   "h_BS": 25,

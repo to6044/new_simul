@@ -6,6 +6,7 @@ import subprocess
 import time
 import numpy as np
 import signal
+import multiprocessing as mp
 
 
 def signal_handler(signum, frame):
@@ -19,7 +20,6 @@ def signal_handler(signum, frame):
     Returns:
         None
     """
-
     print(f"Received signal {signum}, exiting...")
     remove_temp_json(json_file_list)
     exit(1)
@@ -35,7 +35,6 @@ def generate_config_dict_list(config_file):
     Returns:
         list: A list of dictionaries, where each dictionary represents a different configuration.
     """
-
     # Load the contents of the JSON file into a dictionary
     with open(config_file) as f:
         config = json.load(f)
@@ -94,7 +93,6 @@ def generate_config_dict_list(config_file):
     return config_dict_list
 
 
-
 # Define a function that dumps all dictionaries in a list to an individual JSON files and return the absolute path of the JSON file as a string
 def dump_json(config_dict_list):
     # Create a list to store the absolute paths of the JSON files
@@ -133,11 +131,9 @@ def run_kiss(temp_json_file):
     print(process.stdout.decode())
     if process.returncode != 0:
         print(process.stderr.decode())
+        return process.returncode
     else:
         return process.returncode
-
-    
-
 
 
 # Define a function that takes a list of temp JSON file paths and removes them from the file system
@@ -149,7 +145,7 @@ def remove_temp_json(json_file_list):
             os.remove(json_file)
             # test if file exists
             if os.path.exists(json_file):
-                # tried removing and it still exists, so raise an error by moving to the exept block below
+                # tried removing and it still exists, so raise an error by moving to the except block below
                 raise OSError
             else:
                 # Get the json file name
@@ -157,11 +153,20 @@ def remove_temp_json(json_file_list):
                 print(f"File {json_file_name} removed successfully")
         except OSError as e:
             print(f"Error deleting file: {e}")
- 
 
 
+# Callback function to update progress
+def update_progress(result):
+    with progress_counter.get_lock():
+        progress_counter.value += 1
+        print(f"Processed {progress_counter.value} of {total_files} files")
 
-import multiprocessing as mp
+
+# Global variables for signal handler
+json_file_list = []
+progress_counter = None
+total_files = 0
+
 
 if __name__ == '__main__':
     # Register the signal handler function to handle the SIGINT and SIGTERM signals
@@ -171,7 +176,6 @@ if __name__ == '__main__':
     # Parse the command line arguments
     parser = argparse.ArgumentParser(
         description='Run kiss.py against a specified config value.')
-
     parser.add_argument(
         '-c',
         '--config-file',
@@ -189,25 +193,40 @@ if __name__ == '__main__':
 
     # Dump the list of dictionaries to individual JSON files
     json_file_list = dump_json(config_dict_list)
+    total_files = len(json_file_list)
 
-    # Initialize a multiprocessing pool with 6 processes and 1 task per child
-    num_processes = 6
+    # Initialize a multiprocessing pool with more processes for your 14-core CPU
+    # Using 12 processes to leave some CPU headroom for the system
+    num_processes = 12
     num_tasks_per_child = 1
     progress_counter = mp.Value('i', 0)  # Shared variable to keep track of progress
 
+    print(f"Starting parallel processing with {num_processes} processes for {total_files} simulations...")
+
     with mp.Pool(processes=num_processes, maxtasksperchild=num_tasks_per_child) as pool:
-        # Run the run_kiss function on each JSON file in the list
+        # Store async results
+        async_results = []
+        
+        # Submit all tasks asynchronously
         for json_file in json_file_list:
-            pool.apply(run_kiss, args=(json_file,)) 
-
-            # Increment the progress counter by 1
-            with progress_counter.get_lock():
-                progress_counter.value += 1
-                print(f"Processed {progress_counter.value} of {len(json_file_list)} files")
-
-        # Close the pool and wait for all processes to complete
+            # Apply async with callback for progress tracking
+            result = pool.apply_async(run_kiss, args=(json_file,), callback=update_progress)
+            async_results.append(result)
+        
+        # Close the pool to prevent any more tasks from being submitted
         pool.close()
+        
+        # Wait for all processes to complete
         pool.join()
+        
+        # Optionally, check for any errors in the results
+        for i, result in enumerate(async_results):
+            try:
+                return_code = result.get(timeout=1)  # Should already be done
+                if return_code != 0:
+                    print(f"Warning: Task {i+1} returned non-zero exit code: {return_code}")
+            except Exception as e:
+                print(f"Error in task {i+1}: {e}")
 
     # Remove the temporary JSON files
     remove_temp_json(json_file_list)
@@ -220,4 +239,4 @@ if __name__ == '__main__':
 
     # Print the elapsed time
     print(f"All subprocesses completed in {elapsed_time:.2f} seconds")
-
+    print(f"Average time per simulation: {elapsed_time/total_files:.2f} seconds")
