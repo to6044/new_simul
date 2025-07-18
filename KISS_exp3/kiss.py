@@ -1,5 +1,3 @@
-# KISS (Keep It Simple Silly!) v3
-
 import argparse
 import dataclasses
 import json
@@ -20,9 +18,6 @@ from exp3_cell_on_off import EXP3CellOnOff, extend_cell_energy_model, EXP3ModelE
 bisect_left = _bisect.bisect_left
 get_timestamp = utils_kiss.get_timestamp
 
-# Get a timestamp for the current time and date
-date_now = get_timestamp(date_only=True)
-time_now = get_timestamp(time_only=True)
 
 
 def create_logfile_path(config_dict, debug_logger: bool = False):
@@ -30,6 +25,19 @@ def create_logfile_path(config_dict, debug_logger: bool = False):
     project_root_dir = config_dict['project_root_dir']
     script_name = config_dict['script_name']
     experiment_description = config_dict['experiment_description']
+    
+    # 실행 타임스탬프를 config에서 가져오기
+    execution_timestamp = config_dict.get('execution_timestamp', None)
+    if execution_timestamp:
+        # run_kiss.py에서 전달받은 타임스탬프 사용
+        parts = execution_timestamp.split('_')
+        date_now = f"{parts[0][:4]}_{parts[0][4:6]}_{parts[0][6:8]}"  # YYYYMMDD -> YYYY_MM_DD
+        time_now = parts[1]  # HHMMSS
+    else:
+        # 기존 방식 (개별 실행 시) - 함수 내에서 계산
+        date_now = get_timestamp(date_only=True)
+        time_now = get_timestamp(time_only=True)
+    
     if debug_logger:
         logfile_name = "_".join(
             [
@@ -38,52 +46,50 @@ def create_logfile_path(config_dict, debug_logger: bool = False):
                 script_name
             ])
     else:
-        # if experiment_description starts with "test_", then remove the "test_" from the acronym, but prefix the acronym with "test_"
+        # if experiment_description starts with "test_", then remove the "test_" from the acronym
         if experiment_description.startswith("test_"):
             acronym = "test_" + ''.join(config_dict['experiment_description'])
         else:
             acronym = ''.join(word[0] for word in config_dict['experiment_description'].split('_'))
         
-
-    if config_dict['scenario_profile'] != "switch_n_cells_off":
-        logfile_name = "_".join(
-        [
-            acronym,
-            "s" + str(config_dict['seed']),
-            "p" + str(config_dict['variable_cell_power_dBm'])
-        ])
-    else:
-        if config_dict['scenario_n_cells'] < 10:
-            n_cells = "0" + str(config_dict['scenario_n_cells'])
+        if config_dict['scenario_profile'] != "switch_n_cells_off":
+            logfile_name = "_".join(
+            [
+                acronym,
+                "s" + str(config_dict['seed']),
+                "p" + str(config_dict['variable_cell_power_dBm'])
+            ])
         else:
-            n_cells = str(config_dict['scenario_n_cells'])
-        # Replace the second letter of the acronym with the number of cells
-        acronym = acronym[:1] + n_cells + acronym[2:]
-        acronym = acronym
-        logfile_name = "_".join(
-        [
-            acronym,
-            "s" + str(config_dict['seed']),
-            "p" + str(config_dict['variable_cell_power_dBm']),
-            time_now,
-        ])
-
+            if config_dict['scenario_n_cells'] < 10:
+                n_cells = "0" + str(config_dict['scenario_n_cells'])
+            else:
+                n_cells = str(config_dict['scenario_n_cells'])
+            # Replace the second letter of the acronym with the number of cells
+            acronym = acronym[:1] + n_cells + acronym[2:]
+            acronym = acronym
+            logfile_name = "_".join(
+            [
+                acronym,
+                "s" + str(config_dict['seed']),
+                "p" + str(config_dict['variable_cell_power_dBm']),
+                time_now,
+            ])
     
-    # if config_dict["experiment_description"] begins with test_, then add `_test` to the logfile_path
+    # 중요: 시간 폴더를 포함한 경로 생성
     if config_dict["experiment_description"].startswith("test_"):
-        logfile_path = f"{project_root_dir}/_test/data/output/{experiment_description}/{date_now}/".replace(".", "_")
+        base_dir = f"{project_root_dir}/_test/data/output/{experiment_description}/{date_now}/{time_now}/".replace(".", "_")
     else:
-        logfile_path = f"{project_root_dir}/data/output/{experiment_description}/{date_now}/{time_now}/".replace(".", "_")
+        base_dir = f"{project_root_dir}/output/{experiment_description}/{date_now}/{time_now}/".replace(".", "_")
     
-    if not os.path.exists(logfile_path):
-        os.makedirs(logfile_path, exist_ok=True)
-
-    logfile_path = os.path.join(logfile_path, logfile_name)
-
+    # 디렉토리 생성
+    if not os.path.exists(base_dir):
+        os.makedirs(base_dir, exist_ok=True)
+    
+    # 전체 파일 경로 생성
+    logfile_path = os.path.join(base_dir, logfile_name)
     logfile_path = logfile_path.replace("-", "_").replace(" ", "_").replace(":", "_").replace(".", "_")
-        
+    
     return logfile_path
-
 
 
 @dataclass(frozen=True)

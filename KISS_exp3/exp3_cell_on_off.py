@@ -1,8 +1,13 @@
 """
 EXP3 Algorithm-based Cell On/Off Scenario for KISS Network Simulator - FIXED VERSION
 
-
 python run_kiss.py -c data/input/exp3_cell_on_off/exp3_training_fixed.json
+
+시뮬레이션 + 자동 분석 : python run_kiss.py -c data/input/exp3_cell_on_off/exp3_training_fixed.json
+시뮬레이션 only : python run_kiss.py -c data/input/exp3_cell_on_off/exp3_training_fixed.json --no-analysis
+기존 결과만 분석 : python run_kiss.py -c data/input/exp3_cell_on_off/exp3_training_fixed.json --analysis-only
+별도 분석 스크립트 사용 : python analyze_exp3_results.py --results_dir _/data/output --output_dir my_analysis
+
 """
 
 import numpy as np

@@ -3,7 +3,7 @@
   "experiment_version": "2.0",
   "script_name": "kiss",
   "script_version": "0.8",
-  "project_root_dir": ".",
+  "project_root_dir": "/home/hoseong/workspace/new_simul/KISS_exp3",
   "debug_logging": true,
   "debug_logging_level": "INFO",
   "line_profiler": false,
