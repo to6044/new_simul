@@ -191,9 +191,9 @@ progress_counter = None
 total_files = 0
 
 
-def run_analysis(config_file, output_base_dir="_/data/output", current_run_timestamp=None):
+def run_analysis(config_file, output_base_dir="data/output", current_run_timestamp=None):
     """
-    실험 완료 후 자동 분석 실행
+    실험 완료 후 자동 분석 실행 - 새로운 디렉토리 구조 지원
     
     Args:
         config_file (str): 사용된 설정 파일 경로
@@ -212,61 +212,119 @@ def run_analysis(config_file, output_base_dir="_/data/output", current_run_times
     
     # 현재 실행의 결과 디렉토리 지정
     if current_run_timestamp:
-        # 현재 실행의 정확한 폴더 지정
-        search_dir = Path(output_base_dir) / experiment_name / current_run_timestamp
-        print(f"📁 현재 실행 결과 디렉토리: {search_dir}")
+        # 타임스탬프 파싱 (YYYY_MM_DD/HHMMSS 형식)
+        date_part, time_part = current_run_timestamp.split('/')
+        results_dir = Path(output_base_dir) / experiment_name / date_part / time_part
+        
+        print(f"📁 분석 대상 디렉토리: {results_dir}")
         
         # 디렉토리 존재 확인
-        if not search_dir.exists():
-            print(f"⚠️ 경고: 디렉토리가 존재하지 않습니다: {search_dir}")
-            print("📂 현재 존재하는 디렉토리 확인 중...")
+        if not results_dir.exists():
+            print(f"⚠️ 경고: 디렉토리가 존재하지 않습니다: {results_dir}")
             
-            # 상위 디렉토리에서 찾기
-            parent_dir = Path(output_base_dir) / experiment_name
-            if parent_dir.exists():
-                subdirs = [d for d in parent_dir.iterdir() if d.is_dir()]
-                print(f"   발견된 디렉토리: {[d.name for d in subdirs[-5:]]}")  # 최근 5개만 표시
+            # 대체 경로들 시도
+            alt_paths = [
+                Path(output_base_dir.replace("_/", "")) / experiment_name / date_part / time_part,
+                Path("output") / experiment_name / date_part / time_part,
+                Path(".") / "output" / experiment_name / date_part / time_part,
+            ]
             
-            # 대체 경로 시도 (data 폴더)
-            alt_search_dir = Path("data/output") / experiment_name / current_run_timestamp.replace("_/", "")
-            if alt_search_dir.exists():
-                print(f"✅ 대체 경로에서 발견: {alt_search_dir}")
-                search_dir = alt_search_dir
+            for alt_path in alt_paths:
+                if alt_path.exists():
+                    print(f"✅ 대체 경로에서 발견: {alt_path}")
+                    results_dir = alt_path
+                    break
             else:
                 print("❌ 결과 디렉토리를 찾을 수 없습니다.")
+                print("\n🔍 현재 디렉토리 구조:")
+                try:
+                    base = Path(output_base_dir) / experiment_name
+                    if base.exists():
+                        for date_dir in sorted(base.iterdir())[-3:]:  # 최근 3개 날짜
+                            print(f"  {date_dir.name}/")
+                            for time_dir in sorted(date_dir.iterdir())[-3:]:  # 최근 3개 시간
+                                print(f"    {time_dir.name}/")
+                except:
+                    pass
                 return
-        
-        # 분석 결과를 같은 디렉토리에 저장
-        analysis_output_dir = search_dir / "analysis_results"
     else:
-        search_dir = Path(output_base_dir)
-        # 타임스탬프가 없으면 별도 디렉토리에 저장
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        analysis_output_dir = Path(f"exp3_analysis_{experiment_name}_{timestamp}")
+        # 최신 실행 찾기
+        exp_dir = Path(output_base_dir) / experiment_name
+        if not exp_dir.exists():
+            print(f"❌ 실험 디렉토리를 찾을 수 없습니다: {exp_dir}")
+            return
+        
+        # 최신 날짜 찾기
+        dates = sorted([d for d in exp_dir.iterdir() if d.is_dir()], reverse=True)
+        if not dates:
+            print("❌ 실행 결과를 찾을 수 없습니다.")
+            return
+        
+        latest_date = dates[0]
+        
+        # 최신 시간 찾기
+        times = sorted([t for t in latest_date.iterdir() if t.is_dir()], reverse=True)
+        if not times:
+            print("❌ 실행 결과를 찾을 수 없습니다.")
+            return
+        
+        latest_time = times[0]
+        results_dir = latest_time
+        
+        print(f"📁 최신 결과 디렉토리: {results_dir}")
+    
+    # exp3_analysis 모듈 import
+    try:
+        from exp3_analysis import EXP3MultiSeedAnalyzer
+    except ImportError:
+        print("❌ exp3_analysis 모듈을 찾을 수 없습니다.")
+        print("💡 exp3_analysis.py 파일이 현재 디렉토리에 있는지 확인하세요.")
+        return
     
     # 분석기 실행
     analyzer = EXP3MultiSeedAnalyzer(
-        results_dir=search_dir,
-        config_file=config_file,
-        output_dir=analysis_output_dir
+        results_dir=results_dir,
+        config_file=config_file
     )
     
     try:
-        analyzer.run()
-        print(f"\n✅ 분석 결과가 '{analysis_output_dir}' 디렉토리에 저장되었습니다.")
+        # 새로운 메서드 이름 사용
+        analyzer.run_analysis()
+        
+        print(f"\n✅ 분석 완료! 결과는 다음 위치에 저장되었습니다:")
+        print(f"   {analyzer.output_dir}")
         
         # 주요 결과 요약 출력
-        summary_file = analysis_output_dir / 'analysis_summary.txt'
+        summary_file = analyzer.output_dir / 'analysis_summary.txt'
         if summary_file.exists():
             print("\n📋 분석 요약:")
             print("-" * 40)
+            # 요약의 일부만 출력 (처음 10줄)
             with open(summary_file, 'r') as f:
-                print(f.read())
+                lines = f.readlines()
+                for line in lines[:15]:  # 처음 15줄만
+                    print(line.rstrip())
+                if len(lines) > 15:
+                    print("... (자세한 내용은 파일을 확인하세요)")
                 
     except Exception as e:
         print(f"\n❌ 분석 중 오류 발생: {e}")
         import traceback
         traceback.print_exc()
+        
+        # 디버깅 정보 출력
+        print("\n🔍 디버깅 정보:")
+        print(f"  - 결과 디렉토리: {results_dir}")
+        print(f"  - 디렉토리 존재 여부: {results_dir.exists()}")
+        if results_dir.exists():
+            print(f"  - 하위 폴더 수: {len(list(results_dir.iterdir()))}")
+            # 처음 5개 하위 폴더 출력
+            for i, item in enumerate(results_dir.iterdir()):
+                if i >= 5:
+                    print("    ...")
+                    break
+                print(f"    - {item.name}")
+
 
 
 if __name__ == '__main__':
@@ -304,19 +362,26 @@ if __name__ == '__main__':
 
     # 분석만 수행하는 경우
     if args.analysis_only:
-        run_analysis(args.config_file, current_run_timestamp=args.analysis_date)
+        if args.analysis_date:
+            # 날짜가 지정된 경우 정확한 형식으로 전달
+            run_analysis(args.config_file, current_run_timestamp=args.analysis_date)
+        else:
+            # 날짜가 없으면 최신 결과 분석
+            run_analysis(args.config_file)
         exit(0)
 
     # Start the timer
     start_time = time.time()
     
     # 현재 실행의 타임스탬프 생성 (모든 시드가 공유)
-    current_run_date = datetime.now().strftime("%Y_%m_%d")
-    current_run_time = datetime.now().strftime("%H%M%S")
-    execution_timestamp = f"{current_run_date}_{current_run_time}"
+    current_run_date_raw = datetime.now().strftime("%Y%m%d")  # "20250721"
+    current_run_date = datetime.now().strftime("%Y_%m_%d")    # "2025_07_21" (디렉토리용)
+    current_run_time = datetime.now().strftime("%H%M%S")      # "015124"
+    execution_timestamp = f"{current_run_date_raw}_{current_run_time}"  # "20250721_015124"
 
     print(f"🚀 Starting execution with timestamp: {execution_timestamp}")
-
+    print(f"📁 Results will be saved in: data/output/<experiment>/{current_run_date}/{current_run_time}/")
+    
     config_dict_list = generate_config_dict_list(args.config_file, execution_timestamp=execution_timestamp)
 
     # Dump the list of dictionaries to individual JSON files
@@ -373,10 +438,13 @@ if __name__ == '__main__':
     # 자동 분석 실행 (--no-analysis 옵션이 없는 경우)
     if not args.no_analysis:
         # 잠시 대기 (파일 시스템 동기화)
+        print("\n⏳ 파일 시스템 동기화 대기 중...")
         time.sleep(2)
         
         # 분석 실행 - 전체 타임스탬프 전달
-        run_analysis(args.config_file, current_run_timestamp=f"{current_run_date}/{current_run_time}")
+        timestamp = f"{current_run_date}/{current_run_time}"
+        print(f"\n🔍 분석 시작: {timestamp}")
+        run_analysis(args.config_file, current_run_timestamp=timestamp)
     else:
         print("\n💡 분석을 건너뛰었습니다. 나중에 분석하려면 다음 명령을 실행하세요:")
         print(f"   python run_kiss.py -c {args.config_file} --analysis-only --analysis-date {current_run_date}/{current_run_time}")

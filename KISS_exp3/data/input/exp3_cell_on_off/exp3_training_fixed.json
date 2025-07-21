@@ -9,7 +9,7 @@
   "line_profiler": false,
   "sim_show_params": false,
   
-  "seed": 20,
+  "seed": 5,
   "isd": 500,
   "sim_radius": 1000,
   "h_BS": 25,
@@ -23,7 +23,7 @@
   
   "nues": 400,
   "h_UT": 1.5,
-  "until": 100,
+  "until": 5000,
   "base_interval": 1.0,
   "mcs_table_number": null,
   "ue_noise_power_dBm": -118,

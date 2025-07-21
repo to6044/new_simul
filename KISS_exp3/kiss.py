@@ -18,8 +18,6 @@ from exp3_cell_on_off import EXP3CellOnOff, extend_cell_energy_model, EXP3ModelE
 bisect_left = _bisect.bisect_left
 get_timestamp = utils_kiss.get_timestamp
 
-
-
 def create_logfile_path(config_dict, debug_logger: bool = False):
     """Create a path for the log file based on the config parameters"""
     project_root_dir = config_dict['project_root_dir']
@@ -29,68 +27,92 @@ def create_logfile_path(config_dict, debug_logger: bool = False):
     # 실행 타임스탬프를 config에서 가져오기
     execution_timestamp = config_dict.get('execution_timestamp', None)
     if execution_timestamp:
-        # run_kiss.py에서 전달받은 타임스탬프 사용
+        # run_kiss.py에서 전달받은 타임스탬프 사용 (YYYYMMDD_HHMMSS 형식)
         parts = execution_timestamp.split('_')
-        date_now = f"{parts[0][:4]}_{parts[0][4:6]}_{parts[0][6:8]}"  # YYYYMMDD -> YYYY_MM_DD
-        time_now = parts[1]  # HHMMSS
+        if len(parts) == 2:
+            # YYYYMMDD_HHMMSS 형식
+            date_str = parts[0]  # YYYYMMDD
+            time_str = parts[1]  # HHMMSS
+            
+            # 날짜를 YYYY_MM_DD 형식으로 변환
+            if len(date_str) == 8:  # YYYYMMDD
+                date_now = f"{date_str[:4]}_{date_str[4:6]}_{date_str[6:8]}"
+            else:
+                date_now = date_str  # 이미 올바른 형식인 경우
+                
+            time_now = time_str
+        else:
+            # 예상치 못한 형식인 경우 기본값 사용
+            date_now = get_timestamp(date_only=True)
+            time_now = get_timestamp(time_only=True)
     else:
-        # 기존 방식 (개별 실행 시) - 함수 내에서 계산
+        # 기존 방식 (개별 실행 시)
         date_now = get_timestamp(date_only=True)
         time_now = get_timestamp(time_only=True)
     
+    # 로그 파일명 생성 (시드별 폴더명으로도 사용)
     if debug_logger:
-        logfile_name = "_".join(
-            [
-                time_now,
-                "debug",
-                script_name
-            ])
+        folder_name = "_".join([
+            time_now,
+            "debug",
+            script_name
+        ])
     else:
-        # if experiment_description starts with "test_", then remove the "test_" from the acronym
+        # 실험 설명에서 약어 생성
         if experiment_description.startswith("test_"):
             acronym = "test_" + ''.join(config_dict['experiment_description'])
         else:
             acronym = ''.join(word[0] for word in config_dict['experiment_description'].split('_'))
         
         if config_dict['scenario_profile'] != "switch_n_cells_off":
-            logfile_name = "_".join(
-            [
+            # 시드와 파워를 포함한 폴더명
+            # 파워 값에서 소수점을 언더스코어로 변경
+            power_str = str(config_dict['variable_cell_power_dBm']).replace('.', '_')
+            folder_name = "_".join([
                 acronym,
                 "s" + str(config_dict['seed']),
-                "p" + str(config_dict['variable_cell_power_dBm'])
+                "p" + power_str
             ])
         else:
             if config_dict['scenario_n_cells'] < 10:
                 n_cells = "0" + str(config_dict['scenario_n_cells'])
             else:
                 n_cells = str(config_dict['scenario_n_cells'])
-            # Replace the second letter of the acronym with the number of cells
             acronym = acronym[:1] + n_cells + acronym[2:]
-            acronym = acronym
-            logfile_name = "_".join(
-            [
+            power_str = str(config_dict['variable_cell_power_dBm']).replace('.', '_')
+            folder_name = "_".join([
                 acronym,
                 "s" + str(config_dict['seed']),
-                "p" + str(config_dict['variable_cell_power_dBm']),
+                "p" + power_str,
                 time_now,
             ])
     
-    # 중요: 시간 폴더를 포함한 경로 생성
+    # 기본 디렉토리 경로 구성
     if config_dict["experiment_description"].startswith("test_"):
-        base_dir = f"{project_root_dir}/_test/data/output/{experiment_description}/{date_now}/{time_now}/".replace(".", "_")
+        base_dir = os.path.join(project_root_dir, "_test", "data", "output", 
+                               experiment_description, date_now, time_now)
     else:
-        base_dir = f"{project_root_dir}/output/{experiment_description}/{date_now}/{time_now}/".replace(".", "_")
+        base_dir = os.path.join(project_root_dir, "data", "output", 
+                               experiment_description, date_now, time_now)
+    
+    # 시드별 폴더 경로 추가
+    seed_dir = os.path.join(base_dir, folder_name)
+    
+    # 특수 문자 제거
+    seed_dir = seed_dir.replace(".", "_").replace("-", "_").replace(" ", "_").replace(":", "_")
     
     # 디렉토리 생성
-    if not os.path.exists(base_dir):
-        os.makedirs(base_dir, exist_ok=True)
+    if not os.path.exists(seed_dir):
+        os.makedirs(seed_dir, exist_ok=True)
+    
+    # 파일명은 폴더명과 동일하게
+    logfile_name = folder_name
     
     # 전체 파일 경로 생성
-    logfile_path = os.path.join(base_dir, logfile_name)
+    logfile_path = os.path.join(seed_dir, logfile_name)
     logfile_path = logfile_path.replace("-", "_").replace(" ", "_").replace(":", "_").replace(".", "_")
     
     return logfile_path
-
 
 @dataclass(frozen=True)
 class SmallCellParameters:
@@ -1519,31 +1541,29 @@ def main(config_dict):
     
     exp3_cell_on_off = None
     if scenario_profile == "exp3_cell_on_off":
-        # 설정에서 EXP3 파라미터 가져오기
+        # EXP3 파라미터 로드
         exp3_n_cells_off = config_dict.get("exp3_n_cells_off", 3)
-        exp3_gamma = config_dict.get("exp3_gamma", 0.15)  # 더 적극적인 탐험
-        exp3_warmup_episodes = config_dict.get("exp3_warmup_episodes", 50)  # 줄어든 웜업
+        exp3_gamma = config_dict.get("exp3_gamma", 0.15)
+        exp3_warmup_episodes = config_dict.get("exp3_warmup_episodes", 50)
         exp3_enable_warmup = config_dict.get("exp3_enable_warmup", True)
         exp3_ensure_min_selection = config_dict.get("exp3_ensure_min_selection", True)
-        exp3_linear_power_model = config_dict.get("exp3_linear_power_model", True)  # 기본값을 True로
-        exp3_power_model_k = config_dict.get("exp3_power_model_k", 0.08)  # 조정된 계수
+        exp3_linear_power_model = config_dict.get("exp3_linear_power_model", True)
+        exp3_power_model_k = config_dict.get("exp3_power_model_k", 0.08)
         exp3_learning_log = config_dict.get("exp3_learning_log", "exp3_learning_progress.json")
         exp3_final_model = config_dict.get("exp3_final_model", "exp3_trained_model.json")
         
-        # 로그 파일 경로 생성 (절대 경로로 수정)
+        # 로그 파일 경로 생성 - 시드별 폴더 내에 저장
+        # data_output_logfile_path가 이미 시드별 폴더를 포함하고 있으므로
+        # 같은 디렉토리에 JSON 파일들을 저장
+        log_dir = os.path.dirname(data_output_logfile_path)
+        
         if exp3_learning_log:
-            exp3_learning_log_path = os.path.join(
-                os.path.dirname(data_output_logfile_path),
-                exp3_learning_log
-            )
+            exp3_learning_log_path = os.path.join(log_dir, exp3_learning_log)
         else:
             exp3_learning_log_path = None
             
         if exp3_final_model:
-            exp3_final_model_path = os.path.join(
-                os.path.dirname(data_output_logfile_path),
-                exp3_final_model
-            )
+            exp3_final_model_path = os.path.join(log_dir, exp3_final_model)
         else:
             exp3_final_model_path = None
         
@@ -1573,7 +1593,6 @@ def main(config_dict):
             final_model_file=exp3_final_model_path,
             verbose=True
         )
-        
         # 셀 에너지 모델 참조 설정 및 linear power model 메서드 추가
         if 'cell_energy_models_dict' in locals():
             exp3_cell_on_off.set_cell_energy_models(cell_energy_models_dict)
