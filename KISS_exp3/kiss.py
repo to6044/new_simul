@@ -11,7 +11,7 @@ import pandas as pd
 from AIMM_simulator import *
 from hexalattice.hexalattice import *
 import utils_kiss
-from exp3_cell_on_off import EXP3CellOnOff, extend_cell_energy_model, EXP3ModelEvaluator
+from exp3_cell_on_off import EXP3CellOnOff, EXP3ModelEvaluator
 
 
 # Fix custom imports
@@ -476,7 +476,6 @@ class CellEnergyModel:
         """
         Initialize variables.
         """
-
         self.cell = cell
         self.cell_id = self.cell.i
         if self.cell.get_power_dBm() >= 30.0:
@@ -495,7 +494,12 @@ class CellEnergyModel:
         self.cell_power_watts = self.params.sectors * self.params.antennas * (
             self.p_static_watts + self. p_dynamic_watts)
 
+        # 선형 모델 설정 추가
+        self.use_linear_model = False  # 기본값: 비선형 모델
+        self.linear_k = 0.08  # 기본 선형 계수
+        
         # END of INIT
+
 
     def from_dBm_to_watts(self, x):
         """Converts dBm (decibel-milliwatt) input value to watts"""
@@ -663,15 +667,51 @@ class CellEnergyModel:
             self.p_static_watts + self.trx_chain_power_dynamic_watts())
 
 
-    def get_cell_power_watts(self, time):
+    def get_cell_power_watts(self, time, use_linear=None):
         """
         Returns the power consumption (in watts) of the cell at a given time.
+        Now supports both linear and non-linear models.
+        
+        Parameters:
+        -----------
+        time : float
+            Current simulation time
+        use_linear : bool, optional
+            Override to use linear model. If None, uses instance setting
+            
+        Returns:
+        --------
+        float
+            Power consumption in watts
         """
-        if time == 0:
-            return self.cell_power_watts
+        # 설정 우선순위: 파라미터 > 인스턴스 설정 > 기본값(비선형)
+        if use_linear is None:
+            use_linear = self.use_linear_model
+            
+        if use_linear:
+            # 선형 모델 사용: P = P_idle + k * N_UE
+            n_ues = len(self.cell.attached) if hasattr(self.cell, 'attached') else 0
+            
+            # Idle power (static power)
+            if hasattr(self.params, 'sectors') and hasattr(self.params, 'antennas'):
+                p_idle = self.p_static_watts * self.params.sectors * self.params.antennas
+            else:
+                p_idle = self.p_static_watts * 3 * 2  # Default: 3 sectors, 2 antennas
+            
+            # Dynamic power based on UE count
+            p_dynamic = self.linear_k * n_ues * 1000  # Convert to watts
+            
+            # Total power with bounds
+            total_power = p_idle + p_dynamic
+            return max(500, min(total_power, 5000))  # 0.5kW to 5kW bounds
+            
         else:
-            self.update_cell_power_watts()
-            return self.cell_power_watts
+            # 기존 비선형 모델
+            if time == 0:
+                return self.cell_power_watts
+            else:
+                self.update_cell_power_watts()
+                return self.cell_power_watts
 
     def f_callback(self, x, **kwargs):
         if isinstance(x, Cellv2):
@@ -1480,10 +1520,7 @@ def main(config_dict):
     for cell in sim.cells:
         cell_energy_models_dict[cell.i] = (CellEnergyModel(cell))
         cell.set_f_callback(cell_energy_models_dict[cell.i].f_callback(cell))
-    # EXP3를 위한 CellEnergyModel 확장
-    if scenario_profile == "exp3_cell_on_off":
-        extend_cell_energy_model(CellEnergyModel)
-
+        
         
     # Add the logger to the simulator
     custom_logger = MyLogger(sim,
@@ -1539,6 +1576,7 @@ def main(config_dict):
         )
     
     
+    # EXP3 시나리오 생성 부분
     exp3_cell_on_off = None
     if scenario_profile == "exp3_cell_on_off":
         # EXP3 파라미터 로드
@@ -1552,9 +1590,7 @@ def main(config_dict):
         exp3_learning_log = config_dict.get("exp3_learning_log", "exp3_learning_progress.json")
         exp3_final_model = config_dict.get("exp3_final_model", "exp3_trained_model.json")
         
-        # 로그 파일 경로 생성 - 시드별 폴더 내에 저장
-        # data_output_logfile_path가 이미 시드별 폴더를 포함하고 있으므로
-        # 같은 디렉토리에 JSON 파일들을 저장
+        # 로그 파일 경로 생성
         log_dir = os.path.dirname(data_output_logfile_path)
         
         if exp3_learning_log:
@@ -1593,38 +1629,17 @@ def main(config_dict):
             final_model_file=exp3_final_model_path,
             verbose=True
         )
-        # 셀 에너지 모델 참조 설정 및 linear power model 메서드 추가
+        
+        # 셀 에너지 모델 참조 설정 및 선형 모델 설정
         if 'cell_energy_models_dict' in locals():
             exp3_cell_on_off.set_cell_energy_models(cell_energy_models_dict)
             
-            # Linear power model 메서드를 각 CellEnergyModel에 추가
+            # 선형 전력 모델 사용 시 모든 CellEnergyModel을 선형 모드로 설정
             if exp3_linear_power_model:
+                print(f"Setting all CellEnergyModels to linear mode with k={exp3_power_model_k}")
                 for cell_id, energy_model in cell_energy_models_dict.items():
-                    # Linear power model 메서드 동적 추가
-                    def get_linear_power_watts(self, n_ues: int, k: float = 0.05) -> float:
-                        """
-                        Calculate cell power using linear model: P = P_idle + k * N_UE * 1000W
-                        """
-                        # Get idle power (static power)
-                        if hasattr(self.params, 'sectors') and hasattr(self.params, 'antennas'):
-                            p_idle = self.p_static_watts * self.params.sectors * self.params.antennas
-                        else:
-                            p_idle = self.p_static_watts * 3 * 2  # Default: 3 sectors, 2 antennas
-                        
-                        # Calculate dynamic power based on UE count
-                        p_dynamic = k * n_ues * 1000  # Convert to watts per UE
-                        
-                        # Total power with realistic bounds
-                        total_power = p_idle + p_dynamic
-                        
-                        # Bounds check: minimum 500W (sleep), maximum 5000W (full load)
-                        total_power = max(500, min(total_power, 5000))
-                        
-                        return total_power
-                    
-                    # 메서드를 인스턴스에 바인딩
-                    import types
-                    energy_model.get_linear_power_watts = types.MethodType(get_linear_power_watts, energy_model)
+                    energy_model.use_linear_model = True
+                    energy_model.linear_k = exp3_power_model_k
         
         print("EXP3CellOnOff scenario initialized successfully!")
     

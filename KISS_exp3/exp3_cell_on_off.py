@@ -354,10 +354,10 @@ class EXP3CellOnOff(Scenario):
 
     
     
-    
+        
     def _calculate_cell_power(self, cell) -> float:
         """
-        Calculate power consumption for a single cell.
+        Calculate power consumption for a cell using unified approach.
         
         Parameters:
         -----------
@@ -370,29 +370,24 @@ class EXP3CellOnOff(Scenario):
             Power consumption in kW
         """
         try:
-            # 에너지 모델이 있는 경우
+            # 에너지 모델이 있는 경우 - 통합된 방식 사용
             if self.cell_energy_models and cell.i in self.cell_energy_models:
                 energy_model = self.cell_energy_models[cell.i]
                 
-                # 선형 전력 모델 사용
-                if self.linear_power_model and hasattr(energy_model, 'get_linear_power_watts'):
-                    n_ues = len(cell.attached) if hasattr(cell, 'attached') else 0
-                    cell_power_watts = energy_model.get_linear_power_watts(n_ues, self.power_model_k)
-                else:
-                    cell_power_watts = energy_model.get_cell_power_watts(self.sim.env.now)
+                # CellEnergyModel의 get_cell_power_watts 직접 사용
+                # 이미 선형/비선형 모드가 설정되어 있으므로 그냥 호출
+                cell_power_watts = energy_model.get_cell_power_watts(self.sim.env.now)
                 
                 # 전력값 검증
                 if np.isfinite(cell_power_watts) and cell_power_watts > 0:
                     return cell_power_watts / 1e3  # kW로 변환
             
-            # Fallback: power_dBm 기반 추정
+            # Fallback은 그대로 유지 (에너지 모델이 없는 경우를 위해)
             if hasattr(cell, 'power_dBm') and np.isfinite(cell.power_dBm):
-                # power_dBm을 기반으로 한 전력 추정
-                # 43 dBm ≈ 20W RF + 1980W 시스템 = 2000W 총 소비
-                rf_power_watts = 10 ** (cell.power_dBm / 10) / 1000  # dBm to W
-                system_power_watts = 1500 + rf_power_watts * 20  # 시스템 전력
+                rf_power_watts = 10 ** (cell.power_dBm / 10) / 1000
+                system_power_watts = 1500 + rf_power_watts * 20
                 total_power_watts = rf_power_watts + system_power_watts
-                return total_power_watts / 1e3  # kW로 변환
+                return total_power_watts / 1e3
                 
         except Exception as e:
             if self.verbose:
@@ -1146,57 +1141,6 @@ class EXP3ModelEvaluator:
         for idx in top_indices:
             results.append((idx, list(self.arms[idx]), self.weights[idx]))
         return results
-
-
-# Extension function for CellEnergyModel
-def extend_cell_energy_model(CellEnergyModel):
-    """
-    Extend CellEnergyModel class with linear power model method
-    
-    Parameters:
-    -----------
-    CellEnergyModel : class
-        The CellEnergyModel class to extend
-    """
-    
-    def get_linear_power_watts(self, n_ues: int, k: float = 0.05) -> float:
-        """
-        Calculate cell power using linear model: P = P_idle + k * N_UE
-        
-        Parameters:
-        -----------
-        n_ues : int
-            Number of UEs attached to the cell
-        k : float
-            Linear coefficient (default: 0.05)
-            
-        Returns:
-        --------
-        float
-            Power consumption in watts
-        """
-        # Get idle power (static power)
-        if hasattr(self, 'params'):
-            if hasattr(self.params, 'sectors') and hasattr(self.params, 'antennas'):
-                p_idle = self.p_static_watts * self.params.sectors * self.params.antennas
-            else:
-                p_idle = self.p_static_watts * 3 * 2  # Default: 3 sectors, 2 antennas
-        else:
-            p_idle = getattr(self, 'p_static_watts', 130) * 3 * 2  # Default macro cell
-        
-        # Calculate dynamic power based on UE count
-        p_dynamic = k * n_ues * 1000  # Convert to watts
-        
-        # Total power with bounds
-        total_power = p_idle + p_dynamic
-        total_power = max(500, min(total_power, 5000))  # 0.5kW to 5kW bounds
-        
-        return total_power
-    
-    # Add method to CellEnergyModel class
-    if hasattr(CellEnergyModel, '__init__'):
-        CellEnergyModel.get_linear_power_watts = get_linear_power_watts
-
 
 # Helper function to add the scenario to configuration
 def add_exp3_scenario_to_config(config_dict: dict, 

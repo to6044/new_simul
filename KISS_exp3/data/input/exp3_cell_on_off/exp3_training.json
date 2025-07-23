@@ -1,15 +1,15 @@
 {
-  "experiment_description": "exp3_cell_optimization_training",
-  "experiment_version": "1.0",
+  "experiment_description": "exp3_cell_optimization_training_fixed",
+  "experiment_version": "2.0",
   "script_name": "kiss",
-  "script_version": "0.7",
-  "project_root_dir": ".",
-  "debug_logging": false,
+  "script_version": "0.8",
+  "project_root_dir": "/home/hoseong/workspace/new_simul/KISS_exp3",
+  "debug_logging": true,
   "debug_logging_level": "INFO",
   "line_profiler": false,
   "sim_show_params": false,
   
-  "seed": 1,
+  "seed": 5,
   "isd": 500,
   "sim_radius": 1000,
   "h_BS": 25,
@@ -23,7 +23,7 @@
   
   "nues": 400,
   "h_UT": 1.5,
-  "until": 15000,
+  "until": 500,
   "base_interval": 1.0,
   "mcs_table_number": null,
   "ue_noise_power_dBm": -118,
@@ -37,14 +37,14 @@
     "SetCellSleep_bedtime_stories": []
   },
   "exp3_n_cells_off": 3,
-  "exp3_gamma": 0.3,
-  "exp3_warmup_episodes": 500,
+  "exp3_gamma": 0.15,
+  "exp3_warmup_episodes": 50,
   "exp3_enable_warmup": true,
   "exp3_ensure_min_selection": true,
-  "exp3_linear_power_model": false,
-  "exp3_power_model_k": 0.05,
-  "exp3_learning_log": "exp3_learning_progress.json",
-  "exp3_final_model": "exp3_trained_model.json",
+  "exp3_linear_power_model": true,
+  "exp3_power_model_k": 0.08,
+  "exp3_learning_log": "exp3_learning_progress_fixed.json",
+  "exp3_final_model": "exp3_trained_model_fixed.json",
   
   "mme_cqi_limit": 1,
   "mme_strategy": "best_sinr_cell",
@@ -59,5 +59,5 @@
   "plot_ues_show_labels": false,
   "plot_ues_show_labels_start": 0,
   "plot_ues_show_labels_end": null,
-  "plot_author": "EXP3 Optimizer"
+  "plot_author": "EXP3 Optimizer v2.0"
 }
