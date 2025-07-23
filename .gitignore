@@ -10,7 +10,7 @@
 *.log
 *.feather
 KISS_exp3/__pycache__
-KISS_exp3/output
+KISS_exp3/data/output
 *.pyc
 *.fea
 *.pstats
