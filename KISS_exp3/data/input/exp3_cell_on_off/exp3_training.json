@@ -1,5 +1,5 @@
 {
-  "experiment_description": "exp3_cell_optimization_training_fixed",
+  "experiment_description": "exp3_cell_optimization_training",
   "experiment_version": "2.0",
   "script_name": "kiss",
   "script_version": "0.8",
@@ -23,7 +23,7 @@
   
   "nues": 400,
   "h_UT": 1.5,
-  "until": 500,
+  "until": 200,
   "base_interval": 1.0,
   "mcs_table_number": null,
   "ue_noise_power_dBm": -118,
@@ -43,8 +43,8 @@
   "exp3_ensure_min_selection": true,
   "exp3_linear_power_model": true,
   "exp3_power_model_k": 0.08,
-  "exp3_learning_log": "exp3_learning_progress_fixed.json",
-  "exp3_final_model": "exp3_trained_model_fixed.json",
+  "exp3_learning_log": "exp3_learning_progress.json",
+  "exp3_final_model": "exp3_trained_model.json",
   
   "mme_cqi_limit": 1,
   "mme_strategy": "best_sinr_cell",
