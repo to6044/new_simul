@@ -561,16 +561,14 @@ class EXP3CellOnOff(Scenario):
             else:
                 energy_stats = {}
             
-            if self.throughput_history:
-                recent_throughput = self.throughput_history[-100:]
-                avg_throughputs = [t['avg_cell_throughput_gbps'] for t in recent_throughput]
-                total_throughputs = [t['total_throughput_gbps'] for t in recent_throughput]
-                
+            if hasattr(self, 'throughput_measurements') and self.throughput_measurements:
+                recent_throughput = self.throughput_measurements[-100:]
                 throughput_stats = {
-                    'avg_cell_throughput_gbps': np.mean(avg_throughputs),
-                    'total_throughput_gbps': np.mean(total_throughputs),
-                    'std_cell_throughput': np.std(avg_throughputs),
-                    'throughput_per_active_cell': recent_throughput[-1]['throughput_per_active_cell']
+                    'avg_throughput_mbps': np.mean(recent_throughput),
+                    'std_throughput_mbps': np.std(recent_throughput),
+                    'min_throughput_mbps': np.min(recent_throughput),
+                    'max_throughput_mbps': np.max(recent_throughput),
+                    'final_throughput_mbps': recent_throughput[-1] if recent_throughput else 0
                 }
                 
             progress_data = {
@@ -596,6 +594,10 @@ class EXP3CellOnOff(Scenario):
                 'regret_statistics': self.get_regret_statistics(),
                 'cumulative_regret_history': self.cumulative_regret_history[-100:],
                 'instant_regret_history': self.instant_regret_history[-100:],
+                
+                # throughput 추가
+                'throughput_measurements': self.throughput_measurements[-100:] if hasattr(self, 'throughput_measurements') else [],
+                'throughput_statistics': throughput_stats,
                 
                 # 기존 메트릭
                 'efficiency_history': self.efficiency_history[-100:],
@@ -847,12 +849,30 @@ class EXP3CellOnOff(Scenario):
             # Measure network performance
             throughput, power, efficiency = self.get_network_metrics()
             
+            if not hasattr(self, 'throughput_measurements'):
+                self.throughput_measurements = []
+            self.throughput_measurements.append(throughput)  # Mbps 단위
+            
             if not hasattr(self, 'power_measurements'):
                 self.power_measurements = []
             self.power_measurements.append(power)
             
             # Calculate reward
             reward = self.calculate_reward(efficiency)
+            
+            energy_metrics = self.calculate_energy_metrics()
+
+            # calculate_throughput_metrics() 대신 측정된 값 직접 사용
+            throughput_metrics = {
+                'total_throughput_gbps': throughput / 1000.0,  # Mbps to Gbps
+                'avg_cell_throughput_gbps': throughput / 1000.0 / (self.k_cells - len(cells_to_turn_off)),
+                'std_cell_throughput': 0,  # 단일 측정값이므로 0
+                'throughput_per_active_cell': throughput / (self.k_cells - len(cells_to_turn_off))  # Mbps per cell
+            }
+
+            # 이력에 추가
+            self.energy_consumption_history.append(energy_metrics)
+            self.throughput_history.append(throughput_metrics)
             
             # Update statistics
             self.episode_count += 1
