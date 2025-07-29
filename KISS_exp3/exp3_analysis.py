@@ -173,15 +173,41 @@ class EXP3MultiSeedAnalyzer:
     def calculate_energy_savings(self, progress_data):
         """에너지 절감율 계산"""
         baseline_power = progress_data.get('baseline_power', 0)
-        power_history = progress_data.get('power_history', [])
         
-        if not power_history or baseline_power == 0:
-            return 0, baseline_power, 0
+        # 디버깅: progress_data에 있는 키들 확인
+        print(f"\n[DEBUG] Progress data keys: {list(progress_data.keys())}")
         
-        avg_power = np.mean(power_history)
-        savings = (baseline_power - avg_power) / baseline_power * 100
+        # energy_statistics 확인
+        energy_stats = progress_data.get('energy_statistics', {})
+        print(f"[DEBUG] energy_statistics: {energy_stats}")
         
-        return savings, baseline_power, avg_power
+        # baseline_power 확인
+        print(f"[DEBUG] baseline_power: {baseline_power}")
+        
+        # energy_statistics에서 직접 가져오기
+        if energy_stats and 'avg_energy_saving_all_on' in energy_stats:
+            savings = energy_stats.get('avg_energy_saving_all_on', 0)
+            current_power = energy_stats.get('current_power_kw', baseline_power)
+            print(f"[DEBUG] Using energy_statistics: savings={savings}, current_power={current_power}")
+            return savings, baseline_power, current_power
+        
+        # efficiency_history 확인
+        efficiency_history = progress_data.get('efficiency_history', [])
+        print(f"[DEBUG] efficiency_history length: {len(efficiency_history)}")
+        
+        # 실제 에너지 절감율 계산 시도
+        if baseline_power > 0 and len(efficiency_history) > 0:
+            baseline_efficiency = progress_data.get('baseline_efficiency', 0)
+            if baseline_efficiency > 0:
+                # 효율성 비율로부터 에너지 절감 추정
+                avg_efficiency = np.mean(efficiency_history[-50:])
+                efficiency_ratio = avg_efficiency / baseline_efficiency
+                estimated_savings = (1 - 1/efficiency_ratio) * 100 if efficiency_ratio > 1 else 0
+                print(f"[DEBUG] Estimated from efficiency: savings={estimated_savings}")
+                return estimated_savings, baseline_power, baseline_power * (1 - estimated_savings/100)
+        
+        print(f"[DEBUG] No energy data found, returning 0")
+        return 0, baseline_power, baseline_power
     
     def analyze_performance(self):
         """전체 성능 분석"""

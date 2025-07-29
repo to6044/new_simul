@@ -249,18 +249,17 @@ class EXP3CellOnOff(Scenario):
                 
                 current_power += cell_power
                 active_cells += 1
-        
-        # 베이스라인 에너지 (모든 셀 켜짐)
-        if self.baseline_energy_consumption is None:
-            self.baseline_energy_consumption = current_power * (self.k_cells / max(active_cells, 1))
-        
+        print(f"[DEBUG] calculate_energy_metrics: current_power={current_power:.2f} kW, active_cells={active_cells}")
+
+        baseline_for_comparison = self.baseline_power if self.baseline_power else current_power
+
         # 에너지 절감율 계산
         energy_saving_all_on = 0.0
-        if self.baseline_energy_consumption > 0:
-            energy_saving_all_on = (1 - current_power / self.baseline_energy_consumption) * 100
+        if baseline_for_comparison > 0:
+            energy_saving_all_on = (1 - current_power / baseline_for_comparison) * 100
         
         # 랜덤 베이스라인 대비 절감율 (평균 50% 셀 off 가정)
-        random_baseline = self.baseline_energy_consumption * 0.75  # 평균적으로 75% 전력 사용
+        random_baseline = baseline_for_comparison * 0.75  # 평균적으로 75% 전력 사용
         energy_saving_random = 0.0
         if random_baseline > 0:
             energy_saving_random = (1 - current_power / random_baseline) * 100
@@ -270,7 +269,7 @@ class EXP3CellOnOff(Scenario):
             'active_cells': active_cells,
             'energy_saving_all_on': energy_saving_all_on,
             'energy_saving_random': energy_saving_random,
-            'baseline_power_kw': self.baseline_energy_consumption
+            'baseline_power_kw': baseline_for_comparison
         }
     
     def calculate_throughput_metrics(self) -> Dict[str, float]:
@@ -542,18 +541,25 @@ class EXP3CellOnOff(Scenario):
             energy_stats = {}
             throughput_stats = {}
             
-            if self.energy_consumption_history:
-                recent_energy = self.energy_consumption_history[-100:]
-                energy_savings_all = [e['energy_saving_all_on'] for e in recent_energy]
-                energy_savings_random = [e['energy_saving_random'] for e in recent_energy]
+            # power_history 추가 (get_network_metrics()에서 얻은 실제 전력값들)
+            power_history = []
+            if hasattr(self, 'power_measurements'):  # 이 리스트를 만들어야 함
+                power_history = self.power_measurements[-100:]
+            
+            # energy_statistics 계산 시 실제 전력값 사용
+            if power_history and self.baseline_power > 0:
+                avg_power = np.mean(power_history)
+                energy_saving_all_on = (1 - avg_power / self.baseline_power) * 100
                 
                 energy_stats = {
-                    'avg_energy_saving_all_on': np.mean(energy_savings_all),
-                    'avg_energy_saving_random': np.mean(energy_savings_random),
-                    'std_energy_saving': np.std(energy_savings_all),
-                    'max_energy_saving': np.max(energy_savings_all),
-                    'current_power_kw': recent_energy[-1]['current_power_kw']
+                    'avg_energy_saving_all_on': energy_saving_all_on,
+                    'avg_energy_saving_random': (1 - avg_power / (self.baseline_power * 0.75)) * 100,
+                    'std_energy_saving': np.std([(1 - p / self.baseline_power) * 100 for p in power_history]),
+                    'max_energy_saving': max([(1 - p / self.baseline_power) * 100 for p in power_history]),
+                    'current_power_kw': power_history[-1] if power_history else 0
                 }
+            else:
+                energy_stats = {}
             
             if self.throughput_history:
                 recent_throughput = self.throughput_history[-100:]
@@ -788,6 +794,9 @@ class EXP3CellOnOff(Scenario):
         self.baseline_throughput = baseline_tp
         self.baseline_power = baseline_pwr
         self.baseline_efficiency = baseline_eff
+
+        # baseline_energy_consumption도 함께 설정 (중요!)
+        self.baseline_energy_consumption = baseline_pwr
         
         # Validate baseline
         if baseline_pwr <= 1.0 or np.isnan(baseline_pwr):
@@ -837,6 +846,10 @@ class EXP3CellOnOff(Scenario):
             
             # Measure network performance
             throughput, power, efficiency = self.get_network_metrics()
+            
+            if not hasattr(self, 'power_measurements'):
+                self.power_measurements = []
+            self.power_measurements.append(power)
             
             # Calculate reward
             reward = self.calculate_reward(efficiency)
