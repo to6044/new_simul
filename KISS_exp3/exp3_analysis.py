@@ -137,16 +137,31 @@ class EXP3MultiSeedAnalyzer:
         return successful_loads > 0
     
     def calculate_seed_regret(self, progress_data, model_data):
-        """후회(regret) 계산"""
-        reward_history = progress_data.get('reward_history', [])
-        arm_history = progress_data.get('arm_history', [])
+        """수정된 후회(regret) 계산 - 이미 계산된 데이터 활용"""
         
-        if not reward_history:
+        # 방법 1: 이미 계산된 cumulative_regret_history 사용 (권장)
+        cumulative_regret_history = progress_data.get('cumulative_regret_history', [])
+        instant_regret_history = progress_data.get('instant_regret_history', [])
+        
+        if cumulative_regret_history:
+            # 이미 계산된 데이터가 있으면 그대로 사용
+            # 최적 arm 정보는 regret_statistics에서 가져오기
+            regret_stats = progress_data.get('regret_statistics', {})
+            best_arm_idx = regret_stats.get('best_arm_idx', -1)
+            best_reward = regret_stats.get('best_arm_avg_reward', 0)
+            
+            return cumulative_regret_history, instant_regret_history, best_arm_idx, best_reward
+        
+        # 방법 2: 직접 계산이 필요한 경우 (올바른 키 이름 사용)
+        reward_history = progress_data.get('reward_history', [])
+        selected_arm_history = progress_data.get('selected_arm_history', [])  # 올바른 키 이름
+        
+        if not reward_history or not selected_arm_history:
             return [], [], None, 0
         
         # 각 arm의 평균 보상 계산
         arm_rewards = defaultdict(list)
-        for arm, reward in zip(arm_history, reward_history):
+        for arm, reward in zip(selected_arm_history, reward_history):
             arm_rewards[arm].append(reward)
         
         # 최적 arm 찾기
@@ -162,7 +177,7 @@ class EXP3MultiSeedAnalyzer:
         
         # 누적 후회 계산
         instant_regret = []
-        for t, (chosen_arm, reward) in enumerate(zip(arm_history, reward_history)):
+        for t, (chosen_arm, reward) in enumerate(zip(selected_arm_history, reward_history)):
             regret = best_reward - reward
             instant_regret.append(max(0, regret))  # 음수 후회는 0으로
         
@@ -342,16 +357,27 @@ class EXP3MultiSeedAnalyzer:
             print(f"  - 평균 처리량: {self.metrics['throughput_mean']:.2f} Mbps ± {self.metrics['throughput_std']:.2f}")
         
     def calculate_overall_regret(self):
-        """전체 후회 분석"""
+        """메트릭 계산 - 수정된 버전"""
         if not self.all_results['cumulative_regret']:
+            print("⚠️ cumulative_regret 데이터가 없습니다. 메트릭 계산을 건너뜁니다.")
+            return
+        
+        # 각 시드의 regret 데이터 길이 확인
+        regret_lengths = [len(regret) for regret in self.all_results['cumulative_regret']]
+        print(f"각 시드의 regret 데이터 길이: {regret_lengths}")
+        
+        if all(length == 0 for length in regret_lengths):
+            print("❌ 모든 시드의 regret 데이터가 비어있습니다.")
             return
         
         # 모든 시드의 최대 에피소드 수 찾기
-        max_episodes = max(len(regret) for regret in self.all_results['cumulative_regret'])
+        max_episodes = max(regret_lengths)
         
         # 평균 누적 후회 계산
         aligned_regrets = []
         for regret in self.all_results['cumulative_regret']:
+            if len(regret) == 0:  # 빈 리스트는 건너뛰기
+                continue
             # 짧은 시드는 마지막 값으로 패딩
             if len(regret) < max_episodes:
                 padded = regret + [regret[-1]] * (max_episodes - len(regret))
@@ -359,11 +385,17 @@ class EXP3MultiSeedAnalyzer:
                 padded = regret[:max_episodes]
             aligned_regrets.append(padded)
         
+        if not aligned_regrets:
+            print("❌ 유효한 regret 데이터가 없습니다.")
+            return
+        
         self.metrics['avg_cumulative_regret'] = np.mean(aligned_regrets, axis=0)
         self.metrics['std_cumulative_regret'] = np.std(aligned_regrets, axis=0)
         
         # 평균 후회 계산
         self.metrics['avg_regret'] = self.metrics['avg_cumulative_regret'] / np.arange(1, max_episodes + 1)
+        
+        print(f"✅ 메트릭 계산 완료: {max_episodes} 에피소드")
     
     def plot_all_results(self, save_dir=None):
         """모든 결과 시각화"""
