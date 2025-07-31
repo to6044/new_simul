@@ -11,7 +11,7 @@ import pandas as pd
 from AIMM_simulator import *
 from hexalattice.hexalattice import *
 import utils_kiss
-from exp3_cell_on_off import EXP3CellOnOff, EXP3ModelEvaluator
+from exp3_cell_on_off import EXP3CellOnOff
 
 
 # Fix custom imports
@@ -1642,59 +1642,7 @@ def main(config_dict):
                     energy_model.linear_k = exp3_power_model_k
         
         print("EXP3CellOnOff scenario initialized successfully!")
-    
-     # EXP3 모델 평가 시나리오 (학습된 모델 적용용)
-    exp3_evaluation = None
-    if scenario_profile == "exp3_evaluation":
-        model_file = config_dict.get("exp3_model_file")
-        if not model_file:
-            raise ValueError("exp3_model_file must be specified for exp3_evaluation scenario")
-        
-        # 절대 경로로 변환
-        if not os.path.isabs(model_file):
-            model_file = os.path.join(os.path.dirname(data_output_logfile_path), model_file)
-            
-        if not os.path.exists(model_file):
-            raise FileNotFoundError(f"EXP3 model file not found: {model_file}")
-        
-        # 학습된 모델 로드
-        from exp3_cell_on_off import EXP3ModelEvaluator
-        evaluator = EXP3ModelEvaluator(model_file)
-        best_arm_idx, best_arm_cells = evaluator.get_best_arm()
-        
-        print(f"Applying trained EXP3 model from: {model_file}")
-        print(f"Best arm {best_arm_idx}: turning off cells {best_arm_cells}")
-        
-        # 최적 arm으로 고정 셀 끄기 시나리오 생성
-        class FixedCellOffScenario(Scenario):
-            def __init__(self, sim, target_cells, delay=0.0):
-                self.sim = sim
-                self.target_cells = target_cells
-                self.delay = delay
-                
-            def loop(self):
-                if self.delay > 0:
-                    yield self.sim.env.timeout(self.delay)
-                
-                print(f"Turning off cells: {self.target_cells}")
-                for cell_id in self.target_cells:
-                    if cell_id < len(self.sim.cells):
-                        self.sim.cells[cell_id].set_power_dBm(-np.inf)
-                
-        exp3_evaluation = FixedCellOffScenario(
-            sim=sim,
-            target_cells=best_arm_cells,
-            delay=scenario_delay
-        )
 
-        # 최적 arm의 셀로 오버라이드
-        exp3_evaluation.target_cells = best_arm_cells
-    
-    
-    
-    
-    
-    
     
     # Activate scenarios
     if scenario_profile == "reduce_random_cell_power":
@@ -1711,9 +1659,6 @@ def main(config_dict):
         sim.add_scenario(scenario=set_cell_sleep)
     elif scenario_profile == "exp3_cell_on_off":
         sim.add_scenario(scenario=exp3_cell_on_off)
-    elif scenario_profile == "exp3_evaluation":
-        sim.add_scenario(scenario=exp3_evaluation)
-
     elif scenario_profile == "no_scenarios":
         pass
     else:
