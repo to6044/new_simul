@@ -3,7 +3,7 @@
 EXP3 다중 시드 실험 결과 분석 스크립트
 
 사용법:
-python analyze_exp3_results.py --results_dir _/data/output --config exp3_training_fixed.json
+python exp3_analysis.py --results_dir _/data/output --config exp3_training.json
 
 디렉토리 구조:
 data/output/
@@ -24,11 +24,13 @@ from pathlib import Path
 import argparse
 import pandas as pd
 from datetime import datetime
-import scipy.stats as stats
+from scipy import stats
 import os
 import sys
 from collections import defaultdict
 import re
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 
 # 한글 폰트 설정
 import platform
@@ -36,6 +38,10 @@ import matplotlib as mpl
 if platform.system() == 'Linux':
     plt.rcParams['font.family'] = 'DejaVu Sans'
     plt.rcParams['axes.unicode_minus'] = False
+
+# 전역 설정
+SEED_DISPLAY_COUNT = 10  # 모든 그래프에서 표시할 시드 수 통일
+MOVING_AVG_WINDOW = 50  # 이동평균 창 크기
 
 
 class EXP3MultiSeedAnalyzer:
@@ -81,10 +87,48 @@ class EXP3MultiSeedAnalyzer:
         
         return seed_dirs
     
+    def load_csv_data(self, csv_file):
+        """CSV 파일에서 에피소드 데이터 로드"""
+        try:
+            df = pd.read_csv(csv_file)
+            
+            # 리스트 형태로 변환 (기존 코드와 호환성 유지)
+            episode_data = {
+                'reward_history': df['reward'].tolist(),
+                'selected_arm_history': df['selected_arm'].tolist(),
+                'efficiency_history': df['efficiency'].tolist(),
+                'throughput_history': df['throughput_mbps'].tolist(),
+                'power_history': df['power_kw'].tolist(),
+                'energy_saving_history': df['energy_saving_pct'].tolist(),
+                'cumulative_regret_history': df['cumulative_regret'].tolist(),
+                'timestamps': df['timestamp'].tolist(),
+                'episodes': df['episode'].tolist()
+            }
+            
+            # 통계 계산
+            episode_data['statistics'] = {
+                'reward_mean': df['reward'].mean(),
+                'reward_std': df['reward'].std(),
+                'efficiency_mean': df['efficiency'].mean(),
+                'efficiency_std': df['efficiency'].std(),
+                'throughput_mean': df['throughput_mbps'].mean(),
+                'throughput_std': df['throughput_mbps'].std(),
+                'energy_saving_mean': df['energy_saving_pct'].mean(),
+                'energy_saving_std': df['energy_saving_pct'].std(),
+                'final_cumulative_regret': df['cumulative_regret'].iloc[-1] if len(df) > 0 else 0
+            }
+            
+            return episode_data
+            
+        except Exception as e:
+            print(f"❌ CSV 파일 로드 오류: {e}")
+            return None
+        
     def load_seed_results(self, seed_dir):
-        """시드 디렉토리에서 결과 파일 로드"""
+        """시드 디렉토리에서 결과 파일 로드 (JSON + CSV)"""
         progress_file = None
         model_file = None
+        csv_file = None
         
         # 해당 시드 폴더에서 파일 찾기
         for file in seed_dir.iterdir():
@@ -92,22 +136,55 @@ class EXP3MultiSeedAnalyzer:
                 progress_file = file
             elif 'trained_model' in file.name and file.suffix == '.json':
                 model_file = file
+            elif 'episodes.csv' in file.name:
+                csv_file = file
         
-        if not progress_file or not model_file:
-            print(f"⚠️ {seed_dir.name}에서 필요한 파일을 찾을 수 없습니다.")
+        if not progress_file:
+            print(f"⚠️ {seed_dir.name}에서 progress JSON 파일을 찾을 수 없습니다.")
             return None, None
         
         # JSON 파일 로드
         try:
             with open(progress_file, 'r') as f:
                 progress_data = json.load(f)
-            with open(model_file, 'r') as f:
-                model_data = json.load(f)
+            
+            # model 파일이 없으면 progress에서 추출
+            if model_file and model_file.exists():
+                with open(model_file, 'r') as f:
+                    model_data = json.load(f)
+            else:
+                # progress_data에서 model 정보 추출
+                model_data = {
+                    'weights': progress_data.get('model_state', {}).get('weights', []),
+                    'arms': self.extract_arms_from_progress(progress_data),
+                    'total_episodes': progress_data.get('episode', 0)
+                }
+            
+            # CSV 파일 로드 및 병합
+            if csv_file and csv_file.exists():
+                episode_data = self.load_csv_data(csv_file)
+                if episode_data:
+                    # progress_data에 CSV 데이터 병합
+                    progress_data.update(episode_data)
+                    print(f"✅ {seed_dir.name}: CSV 데이터 병합 완료")
+            else:
+                # CSV 파일이 없으면 episode_data_csv 경로에서 찾기
+                csv_path = progress_data.get('episode_data_csv')
+                if csv_path and Path(csv_path).exists():
+                    episode_data = self.load_csv_data(csv_path)
+                    if episode_data:
+                        progress_data.update(episode_data)
+                        print(f"✅ {seed_dir.name}: CSV 데이터 병합 완료 (경로: {csv_path})")
+                else:
+                    print(f"⚠️ {seed_dir.name}: CSV 파일을 찾을 수 없습니다")
+            
             return progress_data, model_data
+            
         except Exception as e:
             print(f"❌ {seed_dir.name} 파일 로드 오류: {e}")
             return None, None
-    
+        
+        
     def load_all_seeds(self):
         """모든 시드의 데이터 로드"""
         seed_dirs = self.find_seed_directories()
@@ -136,26 +213,38 @@ class EXP3MultiSeedAnalyzer:
         print(f"\n✅ {successful_loads}/{len(seed_dirs)}개 시드 데이터 로드 완료")
         return successful_loads > 0
     
+    def extract_arms_from_progress(self, progress_data):
+        """progress_data에서 arms 정보 추출"""
+        # best_arm 정보에서 추출 시도
+        best_arm_info = progress_data.get('best_arm', {})
+        if 'cells_to_turn_off' in best_arm_info:
+            # 전체 arms 리스트를 재구성하기 어려우므로 None 반환
+            return None
+        return None    
+    
+    
     def calculate_seed_regret(self, progress_data, model_data):
-        """수정된 후회(regret) 계산 - 이미 계산된 데이터 활용"""
+        """수정된 후회(regret) 계산 - CSV 데이터 활용"""
         
-        # 방법 1: 이미 계산된 cumulative_regret_history 사용 (권장)
+        # CSV에서 로드된 데이터 사용
         cumulative_regret_history = progress_data.get('cumulative_regret_history', [])
-        instant_regret_history = progress_data.get('instant_regret_history', [])
+        reward_history = progress_data.get('reward_history', [])
+        selected_arm_history = progress_data.get('selected_arm_history', [])
         
         if cumulative_regret_history:
-            # 이미 계산된 데이터가 있으면 그대로 사용
-            # 최적 arm 정보는 regret_statistics에서 가져오기
-            regret_stats = progress_data.get('regret_statistics', {})
+            # 이미 계산된 누적 regret 사용
+            # 순간 regret 계산
+            instant_regret = [0] + [cumulative_regret_history[i] - cumulative_regret_history[i-1] 
+                                   for i in range(1, len(cumulative_regret_history))]
+            
+            # 최적 arm 정보는 JSON의 regret_statistics에서
+            regret_stats = progress_data.get('performance_summary', {}).get('regret_statistics', {})
             best_arm_idx = regret_stats.get('best_arm_idx', -1)
             best_reward = regret_stats.get('best_arm_avg_reward', 0)
             
-            return cumulative_regret_history, instant_regret_history, best_arm_idx, best_reward
+            return cumulative_regret_history, instant_regret, best_arm_idx, best_reward
         
-        # 방법 2: 직접 계산이 필요한 경우 (올바른 키 이름 사용)
-        reward_history = progress_data.get('reward_history', [])
-        selected_arm_history = progress_data.get('selected_arm_history', [])  # 올바른 키 이름
-        
+        # cumulative_regret이 없으면 reward_history에서 계산
         if not reward_history or not selected_arm_history:
             return [], [], None, 0
         
@@ -179,144 +268,93 @@ class EXP3MultiSeedAnalyzer:
         instant_regret = []
         for t, (chosen_arm, reward) in enumerate(zip(selected_arm_history, reward_history)):
             regret = best_reward - reward
-            instant_regret.append(max(0, regret))  # 음수 후회는 0으로
+            instant_regret.append(max(0, regret))
         
         cumulative_regret = np.cumsum(instant_regret).tolist()
         
         return cumulative_regret, instant_regret, best_arm, best_reward
     
+    
     def calculate_energy_savings(self, progress_data):
-        """에너지 절감율 계산"""
-        baseline_power = progress_data.get('baseline_power', 0)
+        """에너지 절감율 계산 - CSV 데이터 활용"""
         
-        # 디버깅: progress_data에 있는 키들 확인
-        print(f"\n[DEBUG] Progress data keys: {list(progress_data.keys())}")
+        # CSV에서 직접 로드된 에너지 절감 데이터 사용
+        energy_saving_history = progress_data.get('energy_saving_history', [])
         
-        # energy_statistics 확인
-        energy_stats = progress_data.get('energy_statistics', {})
-        print(f"[DEBUG] energy_statistics: {energy_stats}")
+        if energy_saving_history:
+            return {
+                'mean': np.mean(energy_saving_history),
+                'std': np.std(energy_saving_history),
+                'final': energy_saving_history[-1] if energy_saving_history else 0
+            }
         
-        # baseline_power 확인
-        print(f"[DEBUG] baseline_power: {baseline_power}")
+        # 대체 방법: JSON의 performance_summary 사용
+        energy_stats = progress_data.get('performance_summary', {}).get('energy_statistics', {})
+        if energy_stats:
+            return {
+                'mean': energy_stats.get('avg_energy_saving_all_on', 0),
+                'std': energy_stats.get('std_energy_saving', 0),
+                'final': energy_stats.get('current_energy_saving', 0)
+            }
         
-        # energy_statistics에서 직접 가져오기
-        if energy_stats and 'avg_energy_saving_all_on' in energy_stats:
-            savings = energy_stats.get('avg_energy_saving_all_on', 0)
-            current_power = energy_stats.get('current_power_kw', baseline_power)
-            print(f"[DEBUG] Using energy_statistics: savings={savings}, current_power={current_power}")
-            return savings, baseline_power, current_power
-        
-        # efficiency_history 확인
-        efficiency_history = progress_data.get('efficiency_history', [])
-        print(f"[DEBUG] efficiency_history length: {len(efficiency_history)}")
-        
-        # 실제 에너지 절감율 계산 시도
-        if baseline_power > 0 and len(efficiency_history) > 0:
-            baseline_efficiency = progress_data.get('baseline_efficiency', 0)
-            if baseline_efficiency > 0:
-                # 효율성 비율로부터 에너지 절감 추정
-                avg_efficiency = np.mean(efficiency_history[-50:])
-                efficiency_ratio = avg_efficiency / baseline_efficiency
-                estimated_savings = (1 - 1/efficiency_ratio) * 100 if efficiency_ratio > 1 else 0
-                print(f"[DEBUG] Estimated from efficiency: savings={estimated_savings}")
-                return estimated_savings, baseline_power, baseline_power * (1 - estimated_savings/100)
-        
-        print(f"[DEBUG] No energy data found, returning 0")
-        return 0, baseline_power, baseline_power
+        return {'mean': 0, 'std': 0, 'final': 0}
     
     def analyze_performance(self):
-        """전체 성능 분석"""
-        if not self.seed_data:
-            print("❌ 분석할 데이터가 없습니다.")
-            return
+        """성능 분석 - CSV와 JSON 데이터 통합"""
+        print("\n📊 성능 지표 분석 중...")
         
-        print("\n📊 성능 분석 중...")
-        
-        # 결과 저장용 리스트 초기화
-        self.all_results = {
-            'cumulative_regret': [],
-            'instant_regret': [],
-            'best_reward': [],
-            'energy_savings': [],
-            'baseline_power': [],
-            'avg_power': [],
-            'rewards': [],
-            'avg_throughput': [],
-            'final_weights': []
-        }
-        
-        # 메트릭 딕셔너리 초기화
-        self.metrics = {}
-        
-        # 각 시드별 분석
-        for seed_num, data in sorted(self.seed_data.items()):
-            progress_data = data['progress']
-            model_data = data['model']
+        for seed_num, data in self.seed_data.items():
+            progress = data['progress']
+            model = data['model']
             
-            # 1. 후회 계산
-            cumulative_regret, instant_regret, best_arm, best_reward = self.calculate_seed_regret(
-                progress_data, model_data
-            )
-            self.all_results['cumulative_regret'].append(cumulative_regret)
-            self.all_results['instant_regret'].append(instant_regret)
-            self.all_results['best_reward'].append(best_reward)
+            # 에너지 절감율 (CSV 데이터 활용)
+            energy_savings = self.calculate_energy_savings(progress)
+            self.all_results['energy_savings'].append(energy_savings['mean'])
             
-            # 2. 에너지 절감율
-            savings_rate, baseline_power, avg_power = self.calculate_energy_savings(progress_data)
-            self.all_results['energy_savings'].append(savings_rate)
-            self.all_results['baseline_power'].append(baseline_power)
-            self.all_results['avg_power'].append(avg_power)
+            # 평균 보상 (CSV 데이터)
+            reward_history = progress.get('reward_history', [])
+            if reward_history:
+                avg_reward = np.mean(reward_history[-100:])  # 마지막 100개
+            else:
+                avg_reward = progress.get('performance_summary', {}).get('recent_avg_reward', 0)
+            self.all_results['avg_rewards'].append(avg_reward)
             
-            # 3. 보상 이력
-            rewards = progress_data.get('reward_history', [])
-            self.all_results['rewards'].append(rewards)
+            # Throughput (CSV 데이터)
+            throughput_history = progress.get('throughput_history', [])
+            if throughput_history:
+                avg_throughput = np.mean(throughput_history[-100:])
+            else:
+                throughput_stats = progress.get('performance_summary', {}).get('throughput_statistics', {})
+                avg_throughput = throughput_stats.get('avg_throughput_mbps', 0)
+            self.all_results['avg_throughputs'].append(avg_throughput)
             
-            # 4. 처리량 정보 - 간단하게 처리
-            throughput_found = False
-            
-            # 옵션 1: throughput_measurements에서 직접 가져오기
-            throughput_measurements = progress_data.get('throughput_measurements', [])
-            if throughput_measurements:
-                avg_throughput = np.mean(throughput_measurements)  # Mbps 단위
-                self.all_results['avg_throughput'].append(avg_throughput)
-                throughput_found = True
-                print(f"  Seed {seed_num}: 평균 처리량 = {avg_throughput:.2f} Mbps (measurements)")
-            
-            # 옵션 2: throughput_statistics에서 가져오기
-            elif 'throughput_statistics' in progress_data:
-                throughput_stats = progress_data['throughput_statistics']
-                if throughput_stats and 'avg_throughput_mbps' in throughput_stats:
-                    avg_throughput = throughput_stats['avg_throughput_mbps']
-                    self.all_results['avg_throughput'].append(avg_throughput)
-                    throughput_found = True
-                    print(f"  Seed {seed_num}: 평균 처리량 = {avg_throughput:.2f} Mbps (statistics)")
-            
-            # 옵션 3: efficiency_history와 power_history에서 역산
-            if not throughput_found:
-                efficiency_history = progress_data.get('efficiency_history', [])
-                baseline_power = progress_data.get('baseline_power', 76)
-                
-                if efficiency_history:
-                    # 효율성(bits/J)과 전력(kW)에서 처리량 역산
-                    # Throughput (Mbps) = Efficiency (bits/J) * Power (kW) / 1000
-                    avg_efficiency = np.mean(efficiency_history[-50:])  # 최근 50개 평균
-                    estimated_power = baseline_power * 0.9  # 약 10% 절감 가정
-                    estimated_throughput = (avg_efficiency * estimated_power) / 1000  # Mbps
-                    self.all_results['avg_throughput'].append(estimated_throughput)
-                    print(f"  Seed {seed_num}: 추정 처리량 = {estimated_throughput:.2f} Mbps (estimated)")
-                else:
-                    # 기본값 설정 (베이스라인의 약 80%)
-                    baseline_throughput = progress_data.get('baseline_throughput', 380)
-                    estimated_throughput = baseline_throughput * 0.8
-                    self.all_results['avg_throughput'].append(estimated_throughput)
-                    print(f"  Seed {seed_num}: 기본 처리량 = {estimated_throughput:.2f} Mbps (default)")
-            
-            # 5. 최종 가중치
-            weights = model_data.get('weights', [])
+            # 최종 가중치 (JSON 데이터)
+            weights = model.get('weights', [])
+            if not weights:
+                weights = progress.get('model_state', {}).get('weights', [])
             self.all_results['final_weights'].append(weights)
+            
+            # 수렴 정보 (JSON 데이터)
+            convergence_info = progress.get('learning_status', {})
+            self.all_results['convergence_episodes'].append(
+                convergence_info.get('convergence_episode', -1)
+            )
+            self.all_results['is_converged'].append(
+                convergence_info.get('is_converged', False)
+            )
         
-        # 통계 계산
-        self.calculate_statistics()
+        # 전체 통계 계산
+        self.metrics['energy_savings_mean'] = np.mean(self.all_results['energy_savings'])
+        self.metrics['energy_savings_std'] = np.std(self.all_results['energy_savings'])
+        self.metrics['reward_mean'] = np.mean(self.all_results['avg_rewards'])
+        self.metrics['reward_std'] = np.std(self.all_results['avg_rewards'])
+        self.metrics['throughput_mean'] = np.mean(self.all_results['avg_throughputs'])
+        self.metrics['throughput_std'] = np.std(self.all_results['avg_throughputs'])
+        
+        print(f"✅ 평균 에너지 절감율: {self.metrics['energy_savings_mean']:.1f}% ± {self.metrics['energy_savings_std']:.1f}%")
+        print(f"✅ 평균 보상: {self.metrics['reward_mean']:.4f} ± {self.metrics['reward_std']:.4f}")
+        print(f"✅ 평균 Throughput: {self.metrics['throughput_mean']:.1f} ± {self.metrics['throughput_std']:.1f} Mbps")
+    
             
             
     def calculate_statistics(self):
@@ -397,185 +435,7 @@ class EXP3MultiSeedAnalyzer:
         
         print(f"✅ 메트릭 계산 완료: {max_episodes} 에피소드")
     
-    def plot_all_results(self, save_dir=None):
-        """모든 결과 시각화"""
-        save_dir = save_dir or self.output_dir
-        
-        print("\n📈 그래프 생성 중...")
-        
-        # 1. 누적 보상
-        self.plot_cumulative_rewards(save_dir)
-        
-        # 2. 누적 후회
-        if 'avg_cumulative_regret' in self.metrics:
-            self.plot_cumulative_regret(save_dir)
-        
-        # 3. 평균 후회
-        if 'avg_regret' in self.metrics:
-            self.plot_average_regret(save_dir)
-        
-        # 4. Arm 선택 분포
-        self.plot_selection_distribution(save_dir)
-        
-        # 5. 에너지-처리량 비교
-        self.plot_energy_throughput_comparison(save_dir)
-        
-        # 6. 수렴 분석
-        self.plot_convergence_analysis(save_dir)
-        
-        print(f"✅ 모든 그래프가 {save_dir}에 저장되었습니다.")
-    
-    def plot_cumulative_rewards(self, save_dir):
-        """누적 보상 그래프"""
-        plt.figure(figsize=(10, 6))
-        
-        # 각 시드별 누적 보상
-        for seed_num, rewards in enumerate(self.all_results['rewards']):
-            if rewards:
-                cumulative_rewards = np.cumsum(rewards)
-                plt.plot(cumulative_rewards, alpha=0.3, label=f'Seed {seed_num}' if seed_num < 5 else None)
-        
-        # 평균 누적 보상
-        if self.all_results['rewards']:
-            max_len = max(len(r) for r in self.all_results['rewards'])
-            aligned_rewards = []
-            for rewards in self.all_results['rewards']:
-                if len(rewards) < max_len:
-                    padded = rewards + [rewards[-1]] * (max_len - len(rewards))
-                else:
-                    padded = rewards[:max_len]
-                aligned_rewards.append(np.cumsum(padded))
-            
-            mean_cumulative = np.mean(aligned_rewards, axis=0)
-            plt.plot(mean_cumulative, 'r-', linewidth=2, label='Average')
-        
-        plt.xlabel('Episode')
-        plt.ylabel('Cumulative Reward')
-        plt.title('Cumulative Rewards over Episodes')
-        plt.legend(loc='best')
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(save_dir / 'cumulative_rewards.png', dpi=300)
-        plt.close()
-    
-    def plot_cumulative_regret(self, save_dir):
-        """누적 후회 그래프"""
-        plt.figure(figsize=(10, 6))
-        
-        episodes = np.arange(len(self.metrics['avg_cumulative_regret']))
-        mean_regret = self.metrics['avg_cumulative_regret']
-        std_regret = self.metrics['std_cumulative_regret']
-        
-        plt.plot(episodes, mean_regret, 'b-', linewidth=2, label='Mean')
-        plt.fill_between(episodes, 
-                        mean_regret - std_regret,
-                        mean_regret + std_regret,
-                        alpha=0.3, color='blue', label='±1 STD')
-        
-        plt.xlabel('Episode')
-        plt.ylabel('Cumulative Regret')
-        plt.title('Average Cumulative Regret over Episodes')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(save_dir / 'cumulative_regret.png', dpi=300)
-        plt.close()
-    
-    def plot_average_regret(self, save_dir):
-        """평균 후회 그래프"""
-        plt.figure(figsize=(10, 6))
-        
-        episodes = np.arange(1, len(self.metrics['avg_regret']) + 1)
-        avg_regret = self.metrics['avg_regret']
-        
-        plt.plot(episodes, avg_regret, 'g-', linewidth=2)
-        plt.xlabel('Episode')
-        plt.ylabel('Average Regret')
-        plt.title('Average Regret per Episode')
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(save_dir / 'average_regret.png', dpi=300)
-        plt.close()
-    
-    def plot_selection_distribution(self, save_dir):
-        """Arm 선택 분포"""
-        plt.figure(figsize=(12, 6))
-        
-        # 모든 시드의 최종 가중치 평균
-        if self.all_results['final_weights']:
-            all_weights = np.array(self.all_results['final_weights'])
-            mean_weights = np.mean(all_weights, axis=0)
-            
-            # 상위 10개 arms
-            top_indices = np.argsort(mean_weights)[-10:][::-1]
-            
-            plt.bar(range(len(top_indices)), mean_weights[top_indices])
-            plt.xlabel('Top 10 Arms')
-            plt.ylabel('Average Weight')
-            plt.title('Distribution of Final Weights (Top 10 Arms)')
-            plt.xticks(range(len(top_indices)), [f'Arm {i}' for i in top_indices], rotation=45)
-            plt.grid(True, alpha=0.3, axis='y')
-            plt.tight_layout()
-            plt.savefig(save_dir / 'selection_distribution.png', dpi=300)
-            plt.close()
-    
-    def plot_energy_throughput_comparison(self, save_dir):
-        """에너지-처리량 비교"""
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-        
-        # 에너지 절감율
-        if self.all_results['energy_savings']:
-            seeds = range(len(self.all_results['energy_savings']))
-            ax1.bar(seeds, self.all_results['energy_savings'])
-            ax1.axhline(y=self.metrics['energy_savings_mean'], color='r', linestyle='--',
-                       label=f'Mean: {self.metrics["energy_savings_mean"]:.1f}%')
-            ax1.set_xlabel('Seed')
-            ax1.set_ylabel('Energy Savings (%)')
-            ax1.set_title('Energy Savings by Seed')
-            ax1.legend()
-            ax1.grid(True, alpha=0.3)
-        
-        # 평균 처리량
-        if self.all_results['avg_throughput']:
-            seeds = range(len(self.all_results['avg_throughput']))
-            ax2.bar(seeds, self.all_results['avg_throughput'])
-            if 'throughput_mean' in self.metrics:
-                ax2.axhline(y=self.metrics['throughput_mean'], color='r', linestyle='--',
-                           label=f'Mean: {self.metrics["throughput_mean"]:.2e}')
-            ax2.set_xlabel('Seed')
-            ax2.set_ylabel('Average Throughput (bits/s)')
-            ax2.set_title('Average Throughput by Seed')
-            ax2.legend()
-            ax2.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(save_dir / 'energy_throughput_comparison.png', dpi=300)
-        plt.close()
-    
-    def plot_convergence_analysis(self, save_dir):
-        """수렴 분석 그래프"""
-        if not self.all_results['final_weights']:
-            return
-            
-        plt.figure(figsize=(10, 6))
-        
-        # 각 시드의 가중치 엔트로피 변화
-        for seed_num, weights in enumerate(self.all_results['final_weights'][:10]):  # 처음 10개만
-            weights_array = np.array(weights)
-            # 정규화
-            weights_norm = weights_array / weights_array.sum()
-            # 엔트로피 계산
-            entropy = -np.sum(weights_norm * np.log(weights_norm + 1e-10))
-            plt.scatter(seed_num, entropy, label=f'Seed {seed_num}')
-        
-        plt.xlabel('Seed')
-        plt.ylabel('Weight Entropy')
-        plt.title('Weight Distribution Entropy by Seed')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(save_dir / 'convergence_analysis.png', dpi=300)
-        plt.close()
+
     
     def save_summary(self):
         """분석 요약 저장"""
@@ -624,7 +484,712 @@ class EXP3MultiSeedAnalyzer:
         print(f"\n✅ 분석 요약이 저장되었습니다:")
         print(f"   - {summary_file}")
         print(f"   - {metrics_file}")
+ 
+ 
     
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import numpy as np
+import pandas as pd
+from scipy import stats
+from collections import defaultdict
+
+# 전역 설정
+SEED_DISPLAY_COUNT = 10  # 모든 그래프에서 표시할 시드 수 통일
+MOVING_AVG_WINDOW = 50  # 이동평균 창 크기
+
+def plot_learning_curves(self, save_dir):
+    """학습 곡선 그리기 - 개선된 버전"""
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # 1. 보상 히스토리 with EMA
+    ax = axes[0, 0]
+    for seed_num, data in list(self.seed_data.items())[:SEED_DISPLAY_COUNT]:
+        rewards = data['progress'].get('reward_history', [])
+        if rewards:
+            # 이동평균
+            window = MOVING_AVG_WINDOW
+            if len(rewards) > window:
+                moving_avg = np.convolve(rewards, np.ones(window)/window, mode='valid')
+                ax.plot(moving_avg, label=f'Seed {seed_num}', alpha=0.7)
+    
+    ax.set_xlabel('Episode')
+    ax.set_ylabel(f'Reward (MA window={MOVING_AVG_WINDOW})')
+    ax.set_title('Reward Learning Curves')
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2)
+    ax.grid(True, alpha=0.3)
+    
+    # 2. 에너지 절감율 with EMA
+    ax = axes[0, 1]
+    all_energy_data = []
+    
+    for seed_num, data in list(self.seed_data.items())[:SEED_DISPLAY_COUNT]:
+        energy_savings = data['progress'].get('energy_saving_history', [])
+        if energy_savings:
+            # 원본 데이터 (투명하게)
+            ax.plot(energy_savings, alpha=0.3, color='gray')
+            
+            # EMA (Exponential Moving Average)
+            ema_alpha = 2 / (MOVING_AVG_WINDOW + 1)
+            ema = pd.Series(energy_savings).ewm(alpha=ema_alpha, adjust=False).mean()
+            ax.plot(ema, label=f'Seed {seed_num}', linewidth=2)
+            all_energy_data.append(energy_savings)
+    
+    # 목표 밴드 추가 (9-10% 예시)
+    ax.axhspan(9, 10, alpha=0.2, color='green', label='Target Band')
+    ax.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+    
+    ax.set_xlabel('Episode')
+    ax.set_ylabel('Energy Saving (%)')
+    ax.set_title('Energy Saving Over Time (with EMA)')
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2)
+    ax.grid(True, alpha=0.3)
+    
+    # 3. 누적 후회 with 95% CI
+    ax = axes[1, 0]
+    all_cumulative_regrets = []
+    
+    for seed_num, data in list(self.seed_data.items())[:SEED_DISPLAY_COUNT]:
+        cumulative_regret = data['progress'].get('cumulative_regret_history', [])
+        if cumulative_regret:
+            episodes = range(1, len(cumulative_regret) + 1)
+            ax.plot(episodes, cumulative_regret, alpha=0.3, color='blue')
+            all_cumulative_regrets.append(cumulative_regret)
+    
+    if all_cumulative_regrets:
+        # 평균과 95% CI 계산
+        min_length = min(len(cr) for cr in all_cumulative_regrets)
+        truncated_regrets = np.array([cr[:min_length] for cr in all_cumulative_regrets])
+        mean_regret = np.mean(truncated_regrets, axis=0)
+        std_regret = np.std(truncated_regrets, axis=0)
+        ci_95 = 1.96 * std_regret / np.sqrt(len(all_cumulative_regrets))
+        
+        episodes = range(1, len(mean_regret) + 1)
+        ax.plot(episodes, mean_regret, 'k-', linewidth=2, label='Mean')
+        ax.fill_between(episodes, mean_regret - ci_95, mean_regret + ci_95, 
+                        alpha=0.3, color='gray', label='95% CI')
+        
+        # 이론적 O(√T) 가이드라인
+        n_arms = 969  # EXP3의 arm 수
+        theoretical_bound = 2 * np.sqrt(np.arange(1, len(mean_regret) + 1) * n_arms * np.log(n_arms))
+        ax.plot(episodes, theoretical_bound, 'r--', label=r'$O(\sqrt{T})$ bound', alpha=0.7)
+    
+    ax.set_xlabel('Episode')
+    ax.set_ylabel('Cumulative Regret')
+    ax.set_title('Cumulative Regret with 95% CI')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # 4. Throughput with SLA
+    ax = axes[1, 1]
+    for seed_num, data in list(self.seed_data.items())[:SEED_DISPLAY_COUNT]:
+        throughput = data['progress'].get('throughput_history', [])
+        if throughput:
+            window = MOVING_AVG_WINDOW
+            if len(throughput) > window:
+                moving_avg = np.convolve(throughput, np.ones(window)/window, mode='valid')
+                ax.plot(moving_avg, label=f'Seed {seed_num}', alpha=0.7)
+    
+    # SLA 기준선 (예: 300 Mbps)
+    ax.axhline(y=300, color='red', linestyle='--', label='SLA (300 Mbps)', linewidth=2)
+    
+    ax.set_xlabel('Episode')
+    ax.set_ylabel(f'Throughput (Mbps, MA window={MOVING_AVG_WINDOW})')
+    ax.set_title('Network Throughput')
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_dir / 'learning_curves_improved.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+    def plot_regret_analysis(self, save_dir):
+        """후회(regret) 분석 플롯 - 개선된 버전"""
+        fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+        fig.suptitle('EXP3 Regret Analysis Across Seeds', fontsize=16)
+        
+        # 1. 누적 regret 비교
+        ax = axes[0, 0]
+        for seed_num, data in list(self.seed_data.items())[:SEED_DISPLAY_COUNT]:
+            cumulative_regret = data['progress'].get('cumulative_regret_history', [])
+            if cumulative_regret:
+                episodes = range(1, len(cumulative_regret) + 1)
+                ax.plot(episodes, cumulative_regret, alpha=0.6)
+        
+        ax.set_xlabel('Episode')
+        ax.set_ylabel('Cumulative Regret')
+        ax.set_title('Cumulative Regret Comparison')
+        ax.grid(True, alpha=0.3)
+        
+        # 2. 평균 regret (선형 스케일)
+        ax = axes[0, 1]
+        all_avg_regrets = []
+        for seed_num, data in list(self.seed_data.items())[:SEED_DISPLAY_COUNT]:
+            cumulative_regret = data['progress'].get('cumulative_regret_history', [])
+            if cumulative_regret:
+                avg_regret = [cumulative_regret[i] / (i + 1) for i in range(len(cumulative_regret))]
+                ax.plot(avg_regret, alpha=0.6)
+                all_avg_regrets.append(avg_regret)
+        
+        ax.set_xlabel('Episode')
+        ax.set_ylabel('Average Regret')
+        ax.set_title('Average Regret (Linear Scale)')
+        ax.grid(True, alpha=0.3)
+        
+        # 3. 평균 regret (로그 스케일)
+        ax = axes[0, 2]
+        for avg_regret in all_avg_regrets:
+            ax.semilogy(avg_regret, alpha=0.6)
+        
+        ax.set_xlabel('Episode')
+        ax.set_ylabel('Average Regret (log scale)')
+        ax.set_title('Average Regret (Log Scale)')
+        ax.grid(True, alpha=0.3)
+        
+        # 4. 최종 regret 분포 (개선된 bin)
+        ax = axes[1, 0]
+        final_regrets = []
+        for data in self.seed_data.values():
+            cum_regret = data['progress'].get('cumulative_regret_history', [])
+            if cum_regret:
+                final_regrets.append(cum_regret[-1])
+        
+        if final_regrets:
+            # Freedman-Diaconis rule for bin width
+            q75, q25 = np.percentile(final_regrets, [75, 25])
+            iqr = q75 - q25
+            bin_width = 2 * iqr / (len(final_regrets) ** (1/3))
+            n_bins = int((max(final_regrets) - min(final_regrets)) / bin_width)
+            n_bins = max(n_bins, 10)  # 최소 10개 bin
+            
+            ax.hist(final_regrets, bins=n_bins, edgecolor='black', alpha=0.7)
+            ax.axvline(np.mean(final_regrets), color='red', linestyle='--', 
+                    label=f'Mean: {np.mean(final_regrets):.2f}')
+            ax.axvline(np.median(final_regrets), color='green', linestyle='--', 
+                    label=f'Median: {np.median(final_regrets):.2f}')
+        
+        ax.set_xlabel('Final Cumulative Regret')
+        ax.set_ylabel('Frequency')
+        ax.set_title('Distribution of Final Regret')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 5. Regret 비율 (모든 시드)
+        ax = axes[1, 1]
+        regret_ratios = []
+        seeds = []
+        
+        for seed_num, data in self.seed_data.items():
+            regret_stats = data['progress'].get('performance_summary', {}).get('regret_statistics', {})
+            regret_ratio = regret_stats.get('regret_ratio', 0)
+            if regret_ratio > 0:
+                regret_ratios.append(regret_ratio)
+                seeds.append(seed_num)
+        
+        if regret_ratios:
+            ax.scatter(seeds, regret_ratios, s=50, alpha=0.6)
+            
+            # 평균과 표준편차
+            mean_ratio = np.mean(regret_ratios)
+            std_ratio = np.std(regret_ratios)
+            ax.axhline(y=mean_ratio, color='blue', linestyle='-', alpha=0.5, 
+                    label=f'Mean: {mean_ratio:.4f}')
+            ax.fill_between(seeds, mean_ratio - std_ratio, mean_ratio + std_ratio, 
+                            alpha=0.2, color='blue', label=f'±1 STD')
+        
+        ax.axhline(y=1.0, color='red', linestyle='--', alpha=0.5, label='Theoretical Limit')
+        ax.set_xlabel('Seed Number')
+        ax.set_ylabel('Regret Ratio (Actual/Theoretical)')
+        ax.set_title('Regret Ratio - All Seeds')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 6. 빈 플롯 처리
+        ax = axes[1, 2]
+        ax.text(0.5, 0.5, 'Additional Analysis\n(Reserved)', 
+                ha='center', va='center', transform=ax.transAxes,
+                fontsize=12, bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.5))
+        ax.axis('off')
+        
+        plt.tight_layout()
+        plt.savefig(save_dir / 'regret_analysis_improved.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def plot_energy_throughput_comparison(self, save_dir):
+        """에너지-처리량 비교 플롯 - 개선된 버전"""
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # 1. 에너지 절감 vs Throughput 산점도 with 회귀분석
+        ax = axes[0]
+        energy_savings_final = []
+        throughput_final = []
+        
+        for seed_num, data in self.seed_data.items():
+            energy_history = data['progress'].get('energy_saving_history', [])
+            throughput_history = data['progress'].get('throughput_history', [])
+            
+            if energy_history and throughput_history:
+                final_energy = np.mean(energy_history[-100:])
+                final_throughput = np.mean(throughput_history[-100:])
+                
+                energy_savings_final.append(final_energy)
+                throughput_final.append(final_throughput)
+                
+                ax.scatter(final_energy, final_throughput, s=50, alpha=0.6)
+        
+        if energy_savings_final and throughput_final:
+            # 평균점 표시
+            ax.scatter(np.mean(energy_savings_final), np.mean(throughput_final), 
+                    s=200, c='red', marker='*', label='Average', zorder=5)
+            
+            # 회귀선과 상관계수
+            slope, intercept, r_value, p_value, std_err = stats.linregress(energy_savings_final, throughput_final)
+            line_x = np.array([min(energy_savings_final), max(energy_savings_final)])
+            line_y = slope * line_x + intercept
+            ax.plot(line_x, line_y, 'r--', alpha=0.8)
+            
+            # 상관계수와 p값 표시
+            ax.text(0.05, 0.95, f'r = {r_value:.3f}\np = {p_value:.3f}', 
+                    transform=ax.transAxes, verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        ax.set_xlabel('Energy Saving (%)')
+        ax.set_ylabel('Throughput (Mbps)')
+        ax.set_title('Energy Saving vs Throughput Trade-off')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        # 2. 시간에 따른 효율성 변화 with 평형 구간 강조
+        ax = axes[1]
+        for seed_num, data in list(self.seed_data.items())[:SEED_DISPLAY_COUNT]:
+            efficiency_history = data['progress'].get('efficiency_history', [])
+            if efficiency_history:
+                # EMA 적용
+                ema_alpha = 2 / (MOVING_AVG_WINDOW + 1)
+                ema = pd.Series(efficiency_history).ewm(alpha=ema_alpha, adjust=False).mean()
+                ax.plot(ema, label=f'Seed {seed_num}', alpha=0.7)
+                
+                # 마지막 20% 구간 강조
+                last_20_percent = int(len(efficiency_history) * 0.8)
+                ax.axvspan(last_20_percent, len(efficiency_history), 
+                        alpha=0.1, color='gray', label='Equilibrium Region' if seed_num == 0 else "")
+        
+        ax.set_xlabel('Episode')
+        ax.set_ylabel(f'Efficiency (bits/J, EMA α={ema_alpha:.3f})')
+        ax.set_title('Network Efficiency Evolution')
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2)
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(save_dir / 'energy_throughput_comparison_improved.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def plot_convergence_analysis(self, save_dir):
+        """수렴 분석 그래프 - 개선된 버전"""
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+        
+        # 1. 가중치 상대 엔트로피 (KL divergence to uniform)
+        ax = axes[0, 0]
+        ax.yaxis.set_major_formatter(ticker.ScalarFormatter(useOffset=False))
+        
+        weight_kl_divergences = []
+        seed_numbers = []
+        
+        for seed_num, data in self.seed_data.items():
+            weights = data['model'].get('weights', [])
+            if not weights:
+                weights = data['progress'].get('model_state', {}).get('weights', [])
+            
+            if weights:
+                weights_array = np.array(weights)
+                # 정규화
+                weights_norm = weights_array / (weights_array.sum() + 1e-10)
+                # 균등분포
+                uniform_dist = np.ones(len(weights)) / len(weights)
+                # KL divergence
+                kl_div = np.sum(weights_norm * np.log(weights_norm / uniform_dist + 1e-10))
+                weight_kl_divergences.append(kl_div)
+                seed_numbers.append(seed_num)
+        
+        if weight_kl_divergences:
+            ax.scatter(seed_numbers, weight_kl_divergences, s=50)
+            ax.axhline(y=0, color='red', linestyle='--', alpha=0.5, label='Uniform (KL=0)')
+        
+        ax.set_xlabel('Seed Number')
+        ax.set_ylabel('KL Divergence from Uniform')
+        ax.set_title('Weight Distribution Concentration')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 2. 수렴 에피소드 분포 또는 N/A
+        ax = axes[0, 1]
+        converged_episodes = []
+        
+        for data in self.seed_data.values():
+            conv_ep = data['progress'].get('learning_status', {}).get('convergence_episode', -1)
+            if conv_ep > 0:
+                converged_episodes.append(conv_ep)
+        
+        if converged_episodes:
+            ax.hist(converged_episodes, bins=20, edgecolor='black', alpha=0.7)
+            ax.axvline(np.mean(converged_episodes), color='red', linestyle='--',
+                    label=f'Mean: {np.mean(converged_episodes):.0f}')
+            ax.set_xlabel('Convergence Episode')
+            ax.set_ylabel('Frequency')
+            ax.legend()
+        else:
+            ax.text(0.5, 0.5, 'No Convergence Detected\n(Criterion may be too strict)', 
+                    ha='center', va='center', transform=ax.transAxes,
+                    fontsize=12, bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.5))
+        
+        ax.set_title(f'Convergence Episodes (τ={0.01}, M={50})')
+        ax.grid(True, alpha=0.3)
+        
+        # 3. 최적 arm 선택 빈도 - 개선된 시각화
+        ax = axes[1, 0]
+        best_arms = []
+        for data in self.seed_data.values():
+            best_arm_info = data['progress'].get('best_arm', {})
+            best_arm_idx = best_arm_info.get('index', -1)
+            if best_arm_idx >= 0:
+                best_arms.append(best_arm_idx)
+        
+        if best_arms:
+            unique_arms, counts = np.unique(best_arms, return_counts=True)
+            # 가장 많이 선택된 arm
+            most_common_idx = np.argmax(counts)
+            most_common_arm = unique_arms[most_common_idx]
+            most_common_count = counts[most_common_idx]
+            
+            # 빈도별 색상
+            colors = ['red' if arm == most_common_arm else 'blue' for arm in unique_arms]
+            ax.bar(range(len(unique_arms)), counts, color=colors, alpha=0.7)
+            
+            ax.set_xlabel('Best Arm Index')
+            ax.set_ylabel('Frequency')
+            ax.set_title(f'Best Arm Distribution (Most common: Arm {most_common_arm}, {most_common_count}/{len(self.seed_data)} seeds)')
+            ax.grid(True, alpha=0.3)
+        
+        # 4. 최종 성능 분포 with baseline
+        ax = axes[1, 1]
+        final_rewards = []
+        for data in self.seed_data.values():
+            reward_history = data['progress'].get('reward_history', [])
+            if reward_history:
+                final_avg_reward = np.mean(reward_history[-100:])
+                final_rewards.append(final_avg_reward)
+        
+        if final_rewards:
+            bp = ax.boxplot(final_rewards, patch_artist=True)
+            bp['boxes'][0].set_facecolor('lightblue')
+            
+            # 무작위 선택 baseline (예시값)
+            random_baseline = 0.3
+            ax.axhline(y=random_baseline, color='red', linestyle='--', 
+                    label=f'Random baseline ({random_baseline:.3f})')
+            
+            ax.set_ylabel('Final Average Reward')
+            ax.set_title('Final Performance Distribution')
+            ax.set_ylim(bottom=0.25, top=max(final_rewards) * 1.1)
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(save_dir / 'convergence_analysis_improved.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def plot_performance_distribution(self, save_dir):
+        """성능 분포 분석 - 개선된 버전"""
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+        
+        # 모든 패널에 대해 동일한 처리
+        metrics = [
+            ('energy_saving_history', 'Energy Saving (%)', axes[0, 0]),
+            ('throughput_history', 'Throughput (Mbps)', axes[0, 1]),
+            ('reward_history', 'Reward', axes[1, 0]),
+            ('efficiency_history', 'Efficiency (bits/J)', axes[1, 1])
+        ]
+        
+        for metric_name, ylabel, ax in metrics:
+            all_values = []
+            ema_values = []  # EMA 기반 값
+            
+            for data in self.seed_data.values():
+                history = data['progress'].get(metric_name, [])
+                if history:
+                    # 마지막 20% 데이터
+                    final_portion = history[int(len(history)*0.8):]
+                    all_values.extend(final_portion)
+                    
+                    # EMA 기반 최종값
+                    ema_alpha = 0.1
+                    ema = pd.Series(history).ewm(alpha=ema_alpha, adjust=False).mean()
+                    ema_values.append(ema.iloc[-1])
+            
+            if all_values:
+                # 히스토그램
+                ax.hist(all_values, bins=50, density=True, alpha=0.5, edgecolor='black', 
+                        label='Raw (last 20%)')
+                
+                # EMA 분포
+                if ema_values:
+                    ax.hist(ema_values, bins=20, density=True, alpha=0.7, 
+                            edgecolor='red', color='red', label='EMA final')
+                
+                # 통계값
+                mean_val = np.mean(all_values)
+                median_val = np.median(all_values)
+                ax.axvline(mean_val, color='red', linestyle='--', linewidth=2)
+                ax.axvline(median_val, color='green', linestyle='--', linewidth=2)
+                
+                # 짧은 텍스트 표기
+                ax.text(0.02, 0.98, f'μ={mean_val:.1f}\nM={median_val:.1f}', 
+                        transform=ax.transAxes, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            
+            ax.set_xlabel(ylabel)
+            ax.set_ylabel('Density')
+            ax.set_title(f'Distribution of {ylabel.split(" ")[0]}')
+            ax.legend(loc='upper right')
+            ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(save_dir / 'performance_distribution_improved.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def plot_arm_selection_frequency(self, save_dir):
+        """Arm 선택 빈도 분석 - 개선된 버전"""
+        fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+        
+        # 1. 상위 arm 선택 빈도 - 가로 막대 그래프
+        ax = axes[0]
+        
+        total_arm_counts = defaultdict(int)
+        for data in self.seed_data.values():
+            arm_counts = data['progress'].get('model_state', {}).get('arm_selection_count', [])
+            if arm_counts:
+                for i, count in enumerate(arm_counts):
+                    total_arm_counts[i] += count
+        
+        if total_arm_counts:
+            # 상위 20개 arm
+            sorted_arms = sorted(total_arm_counts.items(), key=lambda x: x[1], reverse=True)[:20]
+            arms, counts = zip(*sorted_arms)
+            
+            y_pos = np.arange(len(arms))
+            bars = ax.barh(y_pos, counts, alpha=0.7, color='steelblue')
+            
+            # 값 라벨 표시
+            for i, (bar, count) in enumerate(zip(bars, counts)):
+                ax.text(bar.get_width() + max(counts)*0.01, bar.get_y() + bar.get_height()/2, 
+                        f'{count}', ha='left', va='center')
+            
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels([f'Arm {arm}' for arm in arms])
+            ax.set_xlabel('Total Selection Count')
+            ax.set_title('Top 20 Arms by Selection Frequency')
+            ax.grid(True, alpha=0.3, axis='x')
+        
+        # 2. 시드별 최적 arm의 일관성 - jitter 적용
+        ax = axes[1]
+        
+        seed_best_arms = []
+        for seed_num, data in self.seed_data.items():
+            best_arm = data['progress'].get('best_arm', {}).get('index', -1)
+            if best_arm >= 0:
+                seed_best_arms.append((seed_num, best_arm))
+        
+        if seed_best_arms:
+            seeds, best_arms = zip(*seed_best_arms)
+            
+            # Jitter 추가
+            jitter = np.random.normal(0, 0.1, len(seeds))
+            ax.scatter(np.array(seeds) + jitter, best_arms, s=50, alpha=0.6)
+            
+            # 가장 많이 선택된 best arm
+            unique_best, counts = np.unique(best_arms, return_counts=True)
+            most_common_arm = unique_best[np.argmax(counts)]
+            most_common_count = counts[np.argmax(counts)]
+            
+            ax.axhline(y=most_common_arm, color='red', linestyle='--', 
+                    label=f'Most Common: Arm {most_common_arm}')
+            
+            ax.set_xlabel('Seed Number')
+            ax.set_ylabel('Best Arm Index')
+            ax.set_title(f'Best Arm Selection Across Seeds\n(Most common: Arm {most_common_arm}, {most_common_count}/{len(self.seed_data)} seeds)')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(save_dir / 'arm_selection_frequency_improved.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def plot_final_performance_summary(self, save_dir):
+        """최종 성능 요약 플롯 - 개선된 버전"""
+        fig = plt.figure(figsize=(16, 10))
+        gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.3)
+        
+        # 1. 주요 지표 박스플롯 (단위 통일)
+        ax1 = fig.add_subplot(gs[0, :2])
+        
+        metrics_data = []
+        metric_labels = []
+        
+        # 에너지 절감률
+        energy_savings = []
+        for data in self.seed_data.values():
+            energy_history = data['progress'].get('energy_saving_history', [])
+            if energy_history:
+                energy_savings.append(np.mean(energy_history[-100:]))
+        if energy_savings:
+            metrics_data.append(energy_savings)
+            metric_labels.append('Energy\nSaving (%)')
+        
+        # 평균 보상
+        avg_rewards = []
+        for data in self.seed_data.values():
+            reward_history = data['progress'].get('reward_history', [])
+            if reward_history:
+                avg_rewards.append(np.mean(reward_history[-100:]))
+        if avg_rewards:
+            metrics_data.append(avg_rewards)
+            metric_labels.append('Average\nReward')
+        
+        # Throughput (Mbps로 통일)
+        avg_throughputs = []
+        for data in self.seed_data.values():
+            throughput_history = data['progress'].get('throughput_history', [])
+            if throughput_history:
+                avg_throughputs.append(np.mean(throughput_history[-100:]))
+        if avg_throughputs:
+            metrics_data.append(avg_throughputs)
+            metric_labels.append('Throughput\n(Mbps)')
+        
+        if metrics_data:
+            bp = ax1.boxplot(metrics_data, labels=metric_labels, patch_artist=True)
+            for patch in bp['boxes']:
+                patch.set_facecolor('lightblue')
+            ax1.set_title('Performance Metrics Distribution', fontsize=14)
+            ax1.grid(True, alpha=0.3)
+        
+        # 2. 수렴 통계 with 기준 표시
+        ax2 = fig.add_subplot(gs[0, 2])
+        
+        convergence_stats = {'Converged': 0, 'Not Converged': 0}
+        for data in self.seed_data.values():
+            is_converged = data['progress'].get('learning_status', {}).get('is_converged', False)
+            if is_converged:
+                convergence_stats['Converged'] += 1
+            else:
+                convergence_stats['Not Converged'] += 1
+        
+        if sum(convergence_stats.values()) > 0:
+            colors = ['green', 'red']
+            ax2.pie(convergence_stats.values(), labels=convergence_stats.keys(), 
+                    autopct='%1.1f%%', startangle=90, colors=colors)
+            ax2.set_title(f'Convergence Status\n(τ=0.01, M=50 steps)', fontsize=14)
+        
+        # 3. 성능 vs 에너지 절감 산점도 with r, p
+        ax3 = fig.add_subplot(gs[1, 0])
+        
+        if energy_savings and avg_rewards:
+            ax3.scatter(energy_savings, avg_rewards, s=100, alpha=0.6, 
+                        c=range(len(energy_savings)), cmap='viridis')
+            ax3.set_xlabel('Energy Saving (%)')
+            ax3.set_ylabel('Average Reward')
+            ax3.set_title('Energy-Performance Trade-off', fontsize=14)
+            ax3.grid(True, alpha=0.3)
+            
+            # 추세선과 통계
+            if len(energy_savings) > 3:
+                slope, intercept, r_value, p_value, _ = stats.linregress(energy_savings, avg_rewards)
+                line_x = np.array([min(energy_savings), max(energy_savings)])
+                line_y = slope * line_x + intercept
+                ax3.plot(line_x, line_y, "r--", alpha=0.8)
+                
+                # r, p 값 표시
+                ax3.text(0.95, 0.95, f'r = {r_value:.3f}\np = {p_value:.3f}', 
+                        transform=ax3.transAxes, ha='right', va='top',
+                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        # 4. 최종 Regret 분포
+        ax4 = fig.add_subplot(gs[1, 1])
+        
+        final_regrets = []
+        for data in self.seed_data.values():
+            regret_history = data['progress'].get('cumulative_regret_history', [])
+            if regret_history:
+                final_regrets.append(regret_history[-1])
+        
+        if final_regrets:
+            ax4.hist(final_regrets, bins=20, edgecolor='black', alpha=0.7, color='orange')
+            ax4.axvline(np.mean(final_regrets), color='red', linestyle='--', 
+                        label=f'Mean: {np.mean(final_regrets):.1f}')
+            ax4.set_xlabel('Final Cumulative Regret')
+            ax4.set_ylabel('Frequency')
+            ax4.set_title('Final Regret Distribution', fontsize=14)
+            ax4.legend()
+            ax4.grid(True, alpha=0.3)
+        
+        # 5. 통계 요약 테이블 (형식 통일)
+        ax5 = fig.add_subplot(gs[1, 2])
+        ax5.axis('off')
+        
+        summary_stats = []
+        summary_stats.append(['Metric', 'Mean ± Std'])
+        summary_stats.append(['', ''])
+        
+        if energy_savings:
+            summary_stats.append(['Energy Saving (%)', f'{np.mean(energy_savings):.1f} ± {np.std(energy_savings):.1f}'])
+        if avg_rewards:
+            summary_stats.append(['Avg Reward', f'{np.mean(avg_rewards):.4f} ± {np.std(avg_rewards):.4f}'])
+        if avg_throughputs:
+            summary_stats.append(['Throughput (Mbps)', f'{np.mean(avg_throughputs):.1f} ± {np.std(avg_throughputs):.1f}'])
+        if final_regrets:
+            summary_stats.append(['Final Regret', f'{np.mean(final_regrets):.1f} ± {np.std(final_regrets):.1f}'])
+        
+        summary_stats.append(['', ''])
+        summary_stats.append(['Total Seeds (N)', str(len(self.seed_data))])
+        summary_stats.append(['Converged', f'{convergence_stats["Converged"]}/{len(self.seed_data)}'])
+        summary_stats.append(['Episodes (T)', str(data['progress'].get('episode', 0))])
+        summary_stats.append(['MA Window', str(MOVING_AVG_WINDOW)])
+        
+        # 테이블 생성
+        table = ax5.table(cellText=summary_stats, loc='center', cellLoc='left')
+        table.auto_set_font_size(False)
+        table.set_fontsize(10)
+        table.scale(1.2, 1.5)
+        
+        # 헤더 스타일
+        for i in range(len(summary_stats[0])):
+            table[(0, i)].set_facecolor('#4CAF50')
+            table[(0, i)].set_text_props(weight='bold', color='white')
+        
+        ax5.set_title('Summary Statistics', fontsize=14, pad=20)
+        
+        # 전체 제목
+        fig.suptitle('EXP3 Multi-Seed Analysis Summary', fontsize=16, y=0.98)
+        
+        plt.tight_layout()
+        plt.savefig(save_dir / 'final_performance_summary_improved.png', dpi=300, bbox_inches='tight')
+        plt.close()
+    def plot_all_results(self):
+        """모든 결과 플롯 생성"""
+        print("\n📊 결과 시각화 중...")
+        
+        # 분석 결과 디렉토리 생성
+        plots_dir = self.output_dir / 'plots'
+        plots_dir.mkdir(exist_ok=True)
+        
+        # 각 플롯 생성
+        self.plot_learning_curves(plots_dir)
+        self.plot_regret_analysis(plots_dir)
+        self.plot_energy_throughput_comparison(plots_dir)
+        self.plot_convergence_analysis(plots_dir)
+        self.plot_performance_distribution(plots_dir)
+        self.plot_arm_selection_frequency(plots_dir)
+        self.plot_final_performance_summary(plots_dir)   
+        
     def run_analysis(self):
         """전체 분석 실행"""
         print("\n🚀 EXP3 다중 시드 분석 시작...")
@@ -709,13 +1274,13 @@ def main():
         description="EXP3 다중 시드 실험 결과 분석",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-사용 예시:
-  # 특정 실행 결과 분석
-  python exp3_analysis.py --results_dir data/output/exp3_cell_optimization_training_fixed/2025_07_17/120233
-  
-  # 최신 결과 자동 찾기
-  python exp3_analysis.py --experiment_name exp3_cell_optimization_training_fixed
-        """
+                사용 예시:
+                # 특정 실행 결과 분석
+                python exp3_analysis.py --results_dir data/output/exp3_cell_optimization_training_fixed/2025_07_17/120233
+                
+                # 최신 결과 자동 찾기
+                python exp3_analysis.py --experiment_name exp3_cell_optimization_training_fixed
+                        """
     )
     
     parser.add_argument(
