@@ -9,9 +9,66 @@ import signal
 import multiprocessing as mp
 from pathlib import Path
 import sys
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # 분석 모듈 import 추가
 from exp3_analysis import EXP3MultiSeedAnalyzer
+
+def send_email_notification(config_file, elapsed_time, timestamp):
+    """
+    시뮬레이션 완료 시 이메일 알림을 보내는 함수
+    """
+    # 환경변수에서 이메일 설정 읽기
+    sender_email = os.environ.get('KISS_EMAIL_SENDER')
+    sender_password = os.environ.get('KISS_EMAIL_PASSWORD')
+    receiver_email = os.environ.get('KISS_EMAIL_RECEIVER')
+    
+    # 환경변수가 설정되지 않은 경우 경고
+    if not all([sender_email, sender_password, receiver_email]):
+        print("⚠️  이메일 환경변수가 설정되지 않았습니다.")
+        print("다음 환경변수를 설정하세요:")
+        print("  export KISS_EMAIL_SENDER='your_email@gmail.com'")
+        print("  export KISS_EMAIL_PASSWORD='your_app_password'")
+        print("  export KISS_EMAIL_RECEIVER='receiver_email@gmail.com'")
+        return
+    
+    # 이메일 내용 구성
+    subject = "KISS 시뮬레이션 완료"
+    body = f"""
+KISS 시뮬레이션이 완료되었습니다.
+
+실행 정보:
+- 설정 파일: {config_file}
+- 실행 시간: {elapsed_time:.2f}초
+- 타임스탬프: {timestamp}
+- 결과 경로: data/output/<experiment>/{timestamp.replace('/', '/')}/
+
+자동 생성된 알림입니다.
+"""
+    
+    # 이메일 메시지 생성
+    message = MIMEMultipart()
+    message["From"] = sender_email
+    message["To"] = receiver_email
+    message["Subject"] = subject
+    message.attach(MIMEText(body, "plain"))
+    
+    try:
+        # Gmail SMTP 서버 연결
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        
+        # 이메일 전송
+        text = message.as_string()
+        server.sendmail(sender_email, receiver_email, text)
+        server.quit()
+        
+        print("✉️  이메일 알림이 성공적으로 전송되었습니다.")
+    except Exception as e:
+        print(f"⚠️  이메일 전송 실패: {e}")
 
 
 def signal_handler(signum, frame):
@@ -273,13 +330,6 @@ def run_analysis(config_file, output_base_dir="data/output", current_run_timesta
         
         print(f"📁 최신 결과 디렉토리: {results_dir}")
     
-    # exp3_analysis 모듈 import
-    try:
-        from exp3_analysis import EXP3MultiSeedAnalyzer
-    except ImportError:
-        print("❌ exp3_analysis 모듈을 찾을 수 없습니다.")
-        print("💡 exp3_analysis.py 파일이 현재 디렉토리에 있는지 확인하세요.")
-        return
     
     # 분석기 실행
     analyzer = EXP3MultiSeedAnalyzer(
@@ -356,6 +406,13 @@ if __name__ == '__main__':
         '--analysis-date',
         type=str,
         help='분석할 실행 날짜 (YYYY_MM_DD 형식, --analysis-only와 함께 사용)'
+    )
+    
+    # 이메일 알림 옵션 추가
+    parser.add_argument(
+        '--email-notification',
+        action='store_true',
+        help='시뮬레이션 완료 시 이메일 알림 전송'
     )
     
     args = parser.parse_args()
@@ -448,3 +505,7 @@ if __name__ == '__main__':
     else:
         print("\n💡 분석을 건너뛰었습니다. 나중에 분석하려면 다음 명령을 실행하세요:")
         print(f"   python run_kiss.py -c {args.config_file} --analysis-only --analysis-date {current_run_date}/{current_run_time}")
+        
+
+    timestamp = f"{current_run_date}/{current_run_time}"
+    send_email_notification(args.config_file, elapsed_time, timestamp)
