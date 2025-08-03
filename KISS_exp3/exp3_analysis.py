@@ -484,124 +484,112 @@ class EXP3MultiSeedAnalyzer:
         print(f"\n✅ 분석 요약이 저장되었습니다:")
         print(f"   - {summary_file}")
         print(f"   - {metrics_file}")
- 
- 
-    
-import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
-import numpy as np
-import pandas as pd
-from scipy import stats
-from collections import defaultdict
 
-# 전역 설정
-SEED_DISPLAY_COUNT = 10  # 모든 그래프에서 표시할 시드 수 통일
-MOVING_AVG_WINDOW = 50  # 이동평균 창 크기
 
-def plot_learning_curves(self, save_dir):
-    """학습 곡선 그리기 - 개선된 버전"""
-    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-    
-    # 1. 보상 히스토리 with EMA
-    ax = axes[0, 0]
-    for seed_num, data in list(self.seed_data.items())[:SEED_DISPLAY_COUNT]:
-        rewards = data['progress'].get('reward_history', [])
-        if rewards:
-            # 이동평균
-            window = MOVING_AVG_WINDOW
-            if len(rewards) > window:
-                moving_avg = np.convolve(rewards, np.ones(window)/window, mode='valid')
-                ax.plot(moving_avg, label=f'Seed {seed_num}', alpha=0.7)
-    
-    ax.set_xlabel('Episode')
-    ax.set_ylabel(f'Reward (MA window={MOVING_AVG_WINDOW})')
-    ax.set_title('Reward Learning Curves')
-    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2)
-    ax.grid(True, alpha=0.3)
-    
-    # 2. 에너지 절감율 with EMA
-    ax = axes[0, 1]
-    all_energy_data = []
-    
-    for seed_num, data in list(self.seed_data.items())[:SEED_DISPLAY_COUNT]:
-        energy_savings = data['progress'].get('energy_saving_history', [])
-        if energy_savings:
-            # 원본 데이터 (투명하게)
-            ax.plot(energy_savings, alpha=0.3, color='gray')
+    def plot_learning_curves(self, save_dir):
+        """학습 곡선 그리기 - 개선된 버전"""
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        
+        # 1. 보상 히스토리 with EMA
+        ax = axes[0, 0]
+        for seed_num, data in list(self.seed_data.items())[:SEED_DISPLAY_COUNT]:
+            rewards = data['progress'].get('reward_history', [])
+            if rewards:
+                # 이동평균
+                window = MOVING_AVG_WINDOW
+                if len(rewards) > window:
+                    moving_avg = np.convolve(rewards, np.ones(window)/window, mode='valid')
+                    ax.plot(moving_avg, label=f'Seed {seed_num}', alpha=0.7)
+        
+        ax.set_xlabel('Episode')
+        ax.set_ylabel(f'Reward (MA window={MOVING_AVG_WINDOW})')
+        ax.set_title('Reward Learning Curves')
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2)
+        ax.grid(True, alpha=0.3)
+        
+        # 2. 에너지 절감율 with EMA
+        ax = axes[0, 1]
+        all_energy_data = []
+        
+        for seed_num, data in list(self.seed_data.items())[:SEED_DISPLAY_COUNT]:
+            energy_savings = data['progress'].get('energy_saving_history', [])
+            if energy_savings:
+                # 원본 데이터 (투명하게)
+                ax.plot(energy_savings, alpha=0.3, color='gray')
+                
+                # EMA (Exponential Moving Average)
+                ema_alpha = 2 / (MOVING_AVG_WINDOW + 1)
+                ema = pd.Series(energy_savings).ewm(alpha=ema_alpha, adjust=False).mean()
+                ax.plot(ema, label=f'Seed {seed_num}', linewidth=2)
+                all_energy_data.append(energy_savings)
+        
+        # 목표 밴드 추가 (9-10% 예시)
+        ax.axhspan(9, 10, alpha=0.2, color='green', label='Target Band')
+        ax.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+        
+        ax.set_xlabel('Episode')
+        ax.set_ylabel('Energy Saving (%)')
+        ax.set_title('Energy Saving Over Time (with EMA)')
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2)
+        ax.grid(True, alpha=0.3)
+        
+        # 3. 누적 후회 with 95% CI
+        ax = axes[1, 0]
+        all_cumulative_regrets = []
+        
+        for seed_num, data in list(self.seed_data.items())[:SEED_DISPLAY_COUNT]:
+            cumulative_regret = data['progress'].get('cumulative_regret_history', [])
+            if cumulative_regret:
+                episodes = range(1, len(cumulative_regret) + 1)
+                ax.plot(episodes, cumulative_regret, alpha=0.3, color='blue')
+                all_cumulative_regrets.append(cumulative_regret)
+        
+        if all_cumulative_regrets:
+            # 평균과 95% CI 계산
+            min_length = min(len(cr) for cr in all_cumulative_regrets)
+            truncated_regrets = np.array([cr[:min_length] for cr in all_cumulative_regrets])
+            mean_regret = np.mean(truncated_regrets, axis=0)
+            std_regret = np.std(truncated_regrets, axis=0)
+            ci_95 = 1.96 * std_regret / np.sqrt(len(all_cumulative_regrets))
             
-            # EMA (Exponential Moving Average)
-            ema_alpha = 2 / (MOVING_AVG_WINDOW + 1)
-            ema = pd.Series(energy_savings).ewm(alpha=ema_alpha, adjust=False).mean()
-            ax.plot(ema, label=f'Seed {seed_num}', linewidth=2)
-            all_energy_data.append(energy_savings)
-    
-    # 목표 밴드 추가 (9-10% 예시)
-    ax.axhspan(9, 10, alpha=0.2, color='green', label='Target Band')
-    ax.axhline(y=0, color='black', linestyle='--', alpha=0.5)
-    
-    ax.set_xlabel('Episode')
-    ax.set_ylabel('Energy Saving (%)')
-    ax.set_title('Energy Saving Over Time (with EMA)')
-    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2)
-    ax.grid(True, alpha=0.3)
-    
-    # 3. 누적 후회 with 95% CI
-    ax = axes[1, 0]
-    all_cumulative_regrets = []
-    
-    for seed_num, data in list(self.seed_data.items())[:SEED_DISPLAY_COUNT]:
-        cumulative_regret = data['progress'].get('cumulative_regret_history', [])
-        if cumulative_regret:
-            episodes = range(1, len(cumulative_regret) + 1)
-            ax.plot(episodes, cumulative_regret, alpha=0.3, color='blue')
-            all_cumulative_regrets.append(cumulative_regret)
-    
-    if all_cumulative_regrets:
-        # 평균과 95% CI 계산
-        min_length = min(len(cr) for cr in all_cumulative_regrets)
-        truncated_regrets = np.array([cr[:min_length] for cr in all_cumulative_regrets])
-        mean_regret = np.mean(truncated_regrets, axis=0)
-        std_regret = np.std(truncated_regrets, axis=0)
-        ci_95 = 1.96 * std_regret / np.sqrt(len(all_cumulative_regrets))
+            episodes = range(1, len(mean_regret) + 1)
+            ax.plot(episodes, mean_regret, 'k-', linewidth=2, label='Mean')
+            ax.fill_between(episodes, mean_regret - ci_95, mean_regret + ci_95, 
+                            alpha=0.3, color='gray', label='95% CI')
+            
+            # 이론적 O(√T) 가이드라인
+            n_arms = 969  # EXP3의 arm 수
+            theoretical_bound = 2 * np.sqrt(np.arange(1, len(mean_regret) + 1) * n_arms * np.log(n_arms))
+            ax.plot(episodes, theoretical_bound, 'r--', label=r'$O(\sqrt{T})$ bound', alpha=0.7)
         
-        episodes = range(1, len(mean_regret) + 1)
-        ax.plot(episodes, mean_regret, 'k-', linewidth=2, label='Mean')
-        ax.fill_between(episodes, mean_regret - ci_95, mean_regret + ci_95, 
-                        alpha=0.3, color='gray', label='95% CI')
+        ax.set_xlabel('Episode')
+        ax.set_ylabel('Cumulative Regret')
+        ax.set_title('Cumulative Regret with 95% CI')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
         
-        # 이론적 O(√T) 가이드라인
-        n_arms = 969  # EXP3의 arm 수
-        theoretical_bound = 2 * np.sqrt(np.arange(1, len(mean_regret) + 1) * n_arms * np.log(n_arms))
-        ax.plot(episodes, theoretical_bound, 'r--', label=r'$O(\sqrt{T})$ bound', alpha=0.7)
-    
-    ax.set_xlabel('Episode')
-    ax.set_ylabel('Cumulative Regret')
-    ax.set_title('Cumulative Regret with 95% CI')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # 4. Throughput with SLA
-    ax = axes[1, 1]
-    for seed_num, data in list(self.seed_data.items())[:SEED_DISPLAY_COUNT]:
-        throughput = data['progress'].get('throughput_history', [])
-        if throughput:
-            window = MOVING_AVG_WINDOW
-            if len(throughput) > window:
-                moving_avg = np.convolve(throughput, np.ones(window)/window, mode='valid')
-                ax.plot(moving_avg, label=f'Seed {seed_num}', alpha=0.7)
-    
-    # SLA 기준선 (예: 300 Mbps)
-    ax.axhline(y=300, color='red', linestyle='--', label='SLA (300 Mbps)', linewidth=2)
-    
-    ax.set_xlabel('Episode')
-    ax.set_ylabel(f'Throughput (Mbps, MA window={MOVING_AVG_WINDOW})')
-    ax.set_title('Network Throughput')
-    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2)
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(save_dir / 'learning_curves_improved.png', dpi=300, bbox_inches='tight')
-    plt.close()
+        # 4. Throughput with SLA
+        ax = axes[1, 1]
+        for seed_num, data in list(self.seed_data.items())[:SEED_DISPLAY_COUNT]:
+            throughput = data['progress'].get('throughput_history', [])
+            if throughput:
+                window = MOVING_AVG_WINDOW
+                if len(throughput) > window:
+                    moving_avg = np.convolve(throughput, np.ones(window)/window, mode='valid')
+                    ax.plot(moving_avg, label=f'Seed {seed_num}', alpha=0.7)
+        
+        # SLA 기준선 (예: 300 Mbps)
+        ax.axhline(y=300, color='red', linestyle='--', label='SLA (300 Mbps)', linewidth=2)
+        
+        ax.set_xlabel('Episode')
+        ax.set_ylabel(f'Throughput (Mbps, MA window={MOVING_AVG_WINDOW})')
+        ax.set_title('Network Throughput')
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2)
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(save_dir / 'learning_curves_improved.png', dpi=300, bbox_inches='tight')
+        plt.close()
 
     def plot_regret_analysis(self, save_dir):
         """후회(regret) 분석 플롯 - 개선된 버전"""
